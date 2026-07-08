@@ -1,0 +1,14 @@
+__pycache__/
+.venv/
+node_modules/
+dist/
+dataset/raw/videos/*
+dataset/processed/clips/*
+dataset/processed/frames/*
+dataset/annotations/*
+dataset/exports/*
+!dataset/raw/videos/.gitkeep
+!dataset/processed/clips/.gitkeep
+!dataset/processed/frames/.gitkeep
+!dataset/annotations/.gitkeep
+!dataset/exports/.gitkeep
