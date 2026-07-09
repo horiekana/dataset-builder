@@ -11,7 +11,7 @@ from typing import Annotated
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
@@ -26,6 +26,9 @@ MASTER_JSONL = ANNOTATION_DIR / "master.jsonl"
 
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm"}
 SRT_EXTENSIONS = {".srt"}
+APP_VERSION = "0.2.0"
+DEFAULT_INSTRUCTION = "この歩行動画クリップと代表フレームを見て、発話内容を答えてください。"
+SUPPORTED_EXPORT_FORMATS = {"master", "qwen", "llava", "trl"}
 
 
 class VideoUploadResponse(BaseModel):
@@ -72,6 +75,7 @@ class MasterExportRequest(BaseModel):
     video_path: str
     subtitles: list[MasterSubtitleInput]
     export_clips: bool = False
+    export_formats: list[str] = Field(default_factory=lambda: ["master"])
 
 
 class MasterExportResponse(BaseModel):
@@ -80,6 +84,10 @@ class MasterExportResponse(BaseModel):
     video_id: str
     clip_count: int = 0
     frame_count: int = 0
+    export_path: str | None = None
+    manifest_path: str | None = None
+    selected_formats: list[str] = []
+    files: list[str] = []
 
 
 def ensure_dataset_dirs() -> None:
@@ -429,6 +437,178 @@ def write_representative_frame(video_path: Path, video_id: str, sample_id: str, 
     return relative_to_root(output_path)
 
 
+def write_export_jsonl(path: Path, records: list[dict]) -> str:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as handle:
+        for record in records:
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+    return relative_to_root(path)
+
+
+def write_export_json(path: Path, payload: object) -> str:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return relative_to_root(path)
+
+
+def unique_export_directory(video_id: str) -> Path:
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    base_name = f"export_{timestamp}_{safe_identifier(video_id)}"
+    return unique_path(EXPORT_DIR, base_name)
+
+
+def split_records(records: list[dict]) -> dict[str, list[dict]]:
+    total = len(records)
+    if total == 0:
+        return {"train": [], "val": [], "test": []}
+
+    if total == 1:
+        split_names = ["train"]
+    elif total == 2:
+        split_names = ["train", "val"]
+    else:
+        train_count = max(1, round(total * 0.8))
+        val_count = max(1, round(total * 0.1))
+        if train_count + val_count >= total:
+            train_count = max(1, total - 2)
+            val_count = 1
+        test_count = total - train_count - val_count
+        split_names = ["train"] * train_count + ["val"] * val_count + ["test"] * test_count
+
+    result = {"train": [], "val": [], "test": []}
+    for idx, record in enumerate(records):
+        split = split_names[min(idx, len(split_names) - 1)]
+        record["split"] = split
+        result[split].append(record)
+    return result
+
+
+def export_media_file(source_relative_path: str, export_root: Path, media_kind: str) -> str:
+    source_path = resolve_dataset_path(source_relative_path)
+    if not source_path.exists():
+        raise HTTPException(status_code=500, detail=f"Media file not found: {source_relative_path}")
+
+    destination = export_root / "media" / media_kind / source_path.name
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source_path, destination)
+    return destination.relative_to(export_root).as_posix()
+
+
+def validate_master_records(records: list[dict]) -> None:
+    required_fields = ("id", "start_time", "end_time", "instruction", "answer", "split")
+    for idx, record in enumerate(records, start=1):
+        missing = [field for field in required_fields if record.get(field) in (None, "")]
+        if missing:
+            raise HTTPException(status_code=400, detail=f"{idx}件目の必須項目が不足しています: {', '.join(missing)}")
+
+        image_path = record.get("image_path") or record.get("representative_frame_path")
+        clip_path = record.get("clip_path")
+        if not image_path:
+            raise HTTPException(status_code=400, detail=f"{idx}件目に代表フレーム画像がありません。")
+        if not clip_path:
+            raise HTTPException(status_code=400, detail=f"{idx}件目に動画クリップがありません。")
+        if record["end_time"] <= record["start_time"]:
+            raise HTTPException(status_code=400, detail=f"{idx}件目の終了時刻は開始時刻より後にしてください。")
+
+
+def export_master(records_by_split: dict[str, list[dict]], export_root: Path) -> list[str]:
+    records = [record for split in ("train", "val", "test") for record in records_by_split[split]]
+    return [write_export_jsonl(export_root / "master" / "master.jsonl", records)]
+
+
+def qwen_record(record: dict) -> dict:
+    return {
+        "id": record["id"],
+        "split": record["split"],
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image", "image": record["image_path"]},
+                    {"type": "video", "video": record["clip_path"]},
+                    {"type": "text", "text": record["instruction"]},
+                ],
+            },
+            {"role": "assistant", "content": [{"type": "text", "text": record["answer"]}]},
+        ],
+        "metadata": {
+            "start_time": record["start_time"],
+            "end_time": record["end_time"],
+            "duration": record["duration"],
+            "video_id": record["video_id"],
+        },
+    }
+
+
+def export_qwen(records_by_split: dict[str, list[dict]], export_root: Path) -> list[str]:
+    files: list[str] = []
+    for split, records in records_by_split.items():
+        files.append(write_export_jsonl(export_root / "qwen" / f"{split}.jsonl", [qwen_record(record) for record in records]))
+    return files
+
+
+def llava_record(record: dict) -> dict:
+    return {
+        "id": record["id"],
+        "image": record["image_path"],
+        "video": record["clip_path"],
+        "conversations": [
+            {"from": "human", "value": f"<image>\n{record['instruction']}"},
+            {"from": "gpt", "value": record["answer"]},
+        ],
+        "metadata": {
+            "split": record["split"],
+            "start_time": record["start_time"],
+            "end_time": record["end_time"],
+            "duration": record["duration"],
+            "video_id": record["video_id"],
+        },
+    }
+
+
+def export_llava(records_by_split: dict[str, list[dict]], export_root: Path) -> list[str]:
+    files: list[str] = []
+    for split, records in records_by_split.items():
+        files.append(write_export_json(export_root / "llava" / f"{split}.json", [llava_record(record) for record in records]))
+    return files
+
+
+def trl_record(record: dict) -> dict:
+    return {
+        "id": record["id"],
+        "split": record["split"],
+        "image": record["image_path"],
+        "video": record["clip_path"],
+        "messages": [
+            {"role": "user", "content": record["instruction"]},
+            {"role": "assistant", "content": record["answer"]},
+        ],
+        "start_time": record["start_time"],
+        "end_time": record["end_time"],
+        "duration": record["duration"],
+    }
+
+
+def export_trl(records_by_split: dict[str, list[dict]], export_root: Path) -> list[str]:
+    files: list[str] = []
+    for split, records in records_by_split.items():
+        files.append(write_export_jsonl(export_root / "trl" / f"{split}.jsonl", [trl_record(record) for record in records]))
+    return files
+
+
+def run_selected_exporters(records_by_split: dict[str, list[dict]], export_root: Path, selected_formats: list[str]) -> list[str]:
+    files: list[str] = []
+    if "master" in selected_formats:
+        files.extend(export_master(records_by_split, export_root))
+    if "qwen" in selected_formats:
+        files.extend(export_qwen(records_by_split, export_root))
+    if "llava" in selected_formats:
+        files.extend(export_llava(records_by_split, export_root))
+    if "trl" in selected_formats:
+        files.extend(export_trl(records_by_split, export_root))
+    return files
+
+
 app = FastAPI(title="Walking Video Dataset Builder API")
 
 app.add_middleware(
@@ -536,63 +716,63 @@ def export_utterances(request: MasterExportRequest) -> MasterExportResponse:
     if not request.subtitles:
         raise HTTPException(status_code=400, detail="subtitles are required")
 
+    selected_formats = list(dict.fromkeys(request.export_formats or ["master"]))
+    invalid_formats = [export_format for export_format in selected_formats if export_format not in SUPPORTED_EXPORT_FORMATS]
+    if invalid_formats:
+        raise HTTPException(status_code=400, detail=f"Unsupported export format: {', '.join(invalid_formats)}")
+
     video_path = resolve_dataset_path(request.video_path)
     if not video_path.exists():
         raise HTTPException(status_code=404, detail="Video file not found")
+
+    for idx, subtitle in enumerate(request.subtitles, start=1):
+        if subtitle.end_time <= subtitle.start_time:
+            raise HTTPException(status_code=400, detail=f"{idx}件目の終了時刻は開始時刻より後にしてください。")
+        if not subtitle.text.strip():
+            raise HTTPException(status_code=400, detail=f"{idx}件目のanswerが空です。字幕本文を入力してください。")
+        if subtitle.representative_time is None:
+            raise HTTPException(status_code=400, detail=f"{idx}件目に代表フレームがありません。")
+        if not (subtitle.start_time <= subtitle.representative_time <= subtitle.end_time):
+            raise HTTPException(status_code=400, detail=f"{idx}件目の代表フレーム秒数が字幕区間外です。")
 
     existing_records = read_jsonl(MASTER_JSONL)
     kept_records = [record for record in existing_records if record.get("video_id") != request.video_id]
     sample_number = next_sample_number(kept_records)
     created_at = datetime.now(timezone.utc).isoformat()
+    export_root = unique_export_directory(request.video_id)
 
-    if request.export_clips:
-        clear_existing_clips(request.video_id)
-
+    clear_existing_clips(request.video_id)
     clear_existing_frames(request.video_id)
 
-    new_records: list[dict] = []
+    canonical_records: list[dict] = []
     clip_count = 0
     frame_count = 0
     for subtitle in request.subtitles:
-        if subtitle.end_time <= subtitle.start_time:
-            continue
-
-        if subtitle.representative_time is not None and not (
-            subtitle.start_time <= subtitle.representative_time <= subtitle.end_time
-        ):
-            raise HTTPException(
-                status_code=400,
-                detail="representative_time must be between start_time and end_time",
-            )
-
         transcript = subtitle.text.strip()
         sample_id = f"sample_{sample_number:06d}"
         sample_number += 1
         duration = round(subtitle.end_time - subtitle.start_time, 3)
-        clip_path = ""
-        representative_frame_path = ""
 
-        if request.export_clips:
-            clip_path = write_clip(
-                video_path=video_path,
-                video_id=request.video_id,
-                sample_id=sample_id,
-                start_time=subtitle.start_time,
-                duration=duration,
-            )
-            clip_count += 1
+        clip_path = write_clip(
+            video_path=video_path,
+            video_id=request.video_id,
+            sample_id=sample_id,
+            start_time=subtitle.start_time,
+            duration=duration,
+        )
+        clip_count += 1
 
-        if subtitle.representative_time is not None:
-            representative_frame_path = write_representative_frame(
-                video_path=video_path,
-                video_id=request.video_id,
-                sample_id=sample_id,
-                frame_time=subtitle.representative_time,
-            )
-            frame_count += 1
+        representative_frame_path = write_representative_frame(
+            video_path=video_path,
+            video_id=request.video_id,
+            sample_id=sample_id,
+            frame_time=subtitle.representative_time,
+        )
+        frame_count += 1
 
-        new_records.append(
+        canonical_records.append(
             {
+                "id": sample_id,
                 "sample_id": sample_id,
                 "video_id": request.video_id,
                 "start_time": round(subtitle.start_time, 3),
@@ -600,11 +780,13 @@ def export_utterances(request: MasterExportRequest) -> MasterExportResponse:
                 "duration": duration,
                 "video_path": request.video_path,
                 "clip_path": clip_path,
+                "image_path": representative_frame_path,
                 "representative_frame_path": representative_frame_path,
-                "frame_paths": [representative_frame_path] if representative_frame_path else [],
-                "representative_time": round(subtitle.representative_time, 3)
-                if subtitle.representative_time is not None
-                else None,
+                "frame_paths": [representative_frame_path],
+                "representative_time": round(subtitle.representative_time, 3),
+                "instruction": DEFAULT_INSTRUCTION,
+                "answer": transcript,
+                "split": "",
                 "transcript": transcript,
                 "scene_description": "",
                 "notes": "",
@@ -613,12 +795,50 @@ def export_utterances(request: MasterExportRequest) -> MasterExportResponse:
             }
         )
 
-    write_jsonl(MASTER_JSONL, kept_records + new_records)
+    export_records: list[dict] = []
+    for record in canonical_records:
+        export_record = dict(record)
+        export_record["original_clip_path"] = record["clip_path"]
+        export_record["original_image_path"] = record["image_path"]
+        export_record["clip_path"] = export_media_file(record["clip_path"], export_root, "clips")
+        export_record["image_path"] = export_media_file(record["image_path"], export_root, "frames")
+        export_record["representative_frame_path"] = export_record["image_path"]
+        export_record["frame_paths"] = [export_record["image_path"]]
+        export_records.append(export_record)
+
+    records_by_split = split_records(export_records)
+    canonical_by_id = {record["id"]: record for record in canonical_records}
+    for export_record in export_records:
+        canonical_record = canonical_by_id[export_record["id"]]
+        canonical_record["split"] = export_record["split"]
+
+    validate_master_records(export_records)
+    write_jsonl(MASTER_JSONL, kept_records + canonical_records)
+
+    files = run_selected_exporters(records_by_split, export_root, selected_formats)
+    split_counts = {split: len(records) for split, records in records_by_split.items()}
+    manifest = {
+        "app_version": APP_VERSION,
+        "created_at": created_at,
+        "video_id": request.video_id,
+        "record_count": len(export_records),
+        "clip_count": clip_count,
+        "frame_count": frame_count,
+        "selected_formats": selected_formats,
+        "split_strategy": {"train": 0.8, "val": 0.1, "test": 0.1},
+        "split_counts": split_counts,
+        "files": [Path(file_path).relative_to(relative_to_root(export_root)).as_posix() if file_path.startswith(relative_to_root(export_root)) else file_path for file_path in files],
+    }
+    manifest_path = write_export_json(export_root / "manifest.json", manifest)
 
     return MasterExportResponse(
         path=relative_to_root(MASTER_JSONL),
-        count=len(new_records),
+        count=len(export_records),
         video_id=request.video_id,
         clip_count=clip_count,
         frame_count=frame_count,
+        export_path=relative_to_root(export_root),
+        manifest_path=manifest_path,
+        selected_formats=selected_formats,
+        files=files + [manifest_path],
     )

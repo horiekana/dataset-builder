@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import { DEFAULT_EXPORT_FORMATS, EXPORT_FORMAT_OPTIONS } from "./exporters";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
 
@@ -110,6 +111,7 @@ export default function App() {
   const [isSavingSrt, setIsSavingSrt] = useState(false);
   const [isExportingMaster, setIsExportingMaster] = useState(false);
   const [isExportingClips, setIsExportingClips] = useState(false);
+  const [selectedExportFormats, setSelectedExportFormats] = useState(DEFAULT_EXPORT_FORMATS);
   const [statusMessage, setStatusMessage] = useState("");
   const [copyMessage, setCopyMessage] = useState("");
   const [error, setError] = useState("");
@@ -120,12 +122,21 @@ export default function App() {
   }, [video]);
 
   const activityMessage = isExportingClips
-    ? "動画クリップを書き出しています..."
+    ? "選択された形式のデータセットを書き出しています..."
     : isSavingSrt
     ? "SRTを保存しています..."
     : isExportingMaster
     ? "master.jsonlに書き出しています..."
     : "ファイルを読み込んでいます...";
+
+  function toggleExportFormat(format) {
+    setSelectedExportFormats((currentFormats) => {
+      if (currentFormats.includes(format)) {
+        return currentFormats.filter((currentFormat) => currentFormat !== format);
+      }
+      return [...currentFormats, format];
+    });
+  }
 
   async function handleVideoChange(event) {
     const file = event.target.files?.[0];
@@ -421,32 +432,65 @@ export default function App() {
     return () => window.removeEventListener("keydown", handleKeyDown);
   });
 
-  async function exportMasterJsonl(exportClips = false) {
+  function validateDatasetExportInputs() {
     if (!video || !srt?.subtitles?.length) {
       setError("動画ファイルとSRTファイルを読み込んでください。");
-      return;
+      return false;
     }
 
     const invalidIndex = validateSubtitleTimes();
     if (invalidIndex !== -1) {
       setError(`${invalidIndex + 1}件目の終了時刻は開始時刻より後にしてください。`);
       setActiveSubtitleIndex(invalidIndex);
-      return;
+      return false;
     }
+
+    const emptyTextIndex = srt.subtitles.findIndex((subtitle) => !subtitle.text.trim());
+    if (emptyTextIndex !== -1) {
+      setError(`${emptyTextIndex + 1}件目のanswerが空です。字幕本文を入力してください。`);
+      setActiveSubtitleIndex(emptyTextIndex);
+      return false;
+    }
+
+    const missingFrameIndex = srt.subtitles.findIndex(
+      (subtitle) => subtitle.representative_time === null || subtitle.representative_time === undefined,
+    );
+    if (missingFrameIndex !== -1) {
+      setError(`${missingFrameIndex + 1}件目に代表フレームがありません。`);
+      setActiveSubtitleIndex(missingFrameIndex);
+      return false;
+    }
+
+    const invalidFrameIndex = srt.subtitles.findIndex(
+      (subtitle) => subtitle.representative_time < subtitle.start_time || subtitle.representative_time > subtitle.end_time,
+    );
+    if (invalidFrameIndex !== -1) {
+      setError(`${invalidFrameIndex + 1}件目の代表フレーム秒数が字幕区間外です。`);
+      setActiveSubtitleIndex(invalidFrameIndex);
+      return false;
+    }
+
+    if (!selectedExportFormats.length) {
+      setError("出力形式を1つ以上選択してください。");
+      return false;
+    }
+
+    return true;
+  }
+
+  async function exportSelectedDataset() {
+    if (!validateDatasetExportInputs()) return;
 
     setError("");
     setStatusMessage("");
-    if (exportClips) {
-      setIsExportingClips(true);
-    } else {
-      setIsExportingMaster(true);
-    }
+    setIsExportingClips(true);
 
     try {
       const result = await postJson("/api/master/utterances", {
         video_id: video.video_id,
         video_path: video.stored_path,
-        export_clips: exportClips,
+        export_clips: true,
+        export_formats: selectedExportFormats,
         subtitles: srt.subtitles.map((subtitle, idx) => ({
           index: idx + 1,
           start_time: subtitle.start_time,
@@ -455,13 +499,9 @@ export default function App() {
           representative_time: subtitle.representative_time,
         })),
       });
-      if (exportClips) {
-        setStatusMessage(
-          `${result.path} に ${result.count} 件の発話、${result.clip_count} 件のクリップ、${result.frame_count} 件の代表フレームを書き出しました。`,
-        );
-      } else {
-        setStatusMessage(`${result.path} に ${result.count} 件の発話と ${result.frame_count} 件の代表フレームを書き出しました。`);
-      }
+      setStatusMessage(
+        `${result.export_path} に ${result.count} 件の発話、${result.clip_count} 件のクリップ、${result.frame_count} 件の代表フレームを書き出しました。`,
+      );
     } catch (exportError) {
       setError(exportError.message);
     } finally {
@@ -489,21 +529,36 @@ export default function App() {
           <span>SRT字幕</span>
           <input type="file" accept=".srt" onChange={handleSrtChange} />
         </label>
+        <fieldset className="export-format-field">
+          <legend>出力形式</legend>
+          <div className="export-format-options">
+            {EXPORT_FORMAT_OPTIONS.map((option) => (
+              <label className="export-format-option" key={option.id}>
+                <input
+                  checked={selectedExportFormats.includes(option.id)}
+                  disabled={isSavingSrt || isExportingMaster || isExportingClips}
+                  onChange={() => toggleExportFormat(option.id)}
+                  type="checkbox"
+                />
+                <span>{option.label}</span>
+              </label>
+            ))}
+          </div>
+        </fieldset>
         <button
           className="export-button"
-          disabled={!video || !srt?.subtitles?.length || isSavingSrt || isExportingMaster || isExportingClips}
-          onClick={() => exportMasterJsonl(false)}
+          disabled={
+            !video ||
+            !srt?.subtitles?.length ||
+            !selectedExportFormats.length ||
+            isSavingSrt ||
+            isExportingMaster ||
+            isExportingClips
+          }
+          onClick={exportSelectedDataset}
           type="button"
         >
-          {isExportingMaster ? "書き出し中..." : "master.jsonlに書き出す"}
-        </button>
-        <button
-          className="export-button secondary"
-          disabled={!video || !srt?.subtitles?.length || isSavingSrt || isExportingMaster || isExportingClips}
-          onClick={() => exportMasterJsonl(true)}
-          type="button"
-        >
-          {isExportingClips ? "クリップ書き出し中..." : "クリップも書き出す"}
+          {isExportingClips ? "書き出し中..." : "選択形式を書き出す"}
         </button>
       </section>
 

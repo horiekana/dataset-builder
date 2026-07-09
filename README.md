@@ -1,8 +1,8 @@
 # Walking Video Dataset Builder
 
-研究用の歩行動画データセット作成ツールです。現時点では、動画ファイルと外部ツールで作成済みのSRT字幕ファイルを読み込み、ブラウザ上で動画再生、現在秒数コピー、字幕一覧表示、字幕編集、字幕の追加・削除、発話区間編集、代表フレーム指定、SRT上書き保存、発話単位の `master.jsonl` 書き出し、発話ごとの動画クリップ書き出しを行います。
+研究用の歩行動画データセット作成ツールです。現時点では、動画ファイルと外部ツールで作成済みのSRT字幕ファイルを読み込み、ブラウザ上で動画再生、現在秒数コピー、字幕一覧表示、字幕編集、字幕の追加・削除、発話区間編集、代表フレーム指定、SRT上書き保存、発話単位の内部master形式への正規化、モデル別データセット出力、発話ごとの動画クリップ書き出しを行います。
 
-字幕間の `+` を押すと、その位置に空字幕を追加します。新しい字幕は基本2秒間で、次の字幕が近い場合は次の開始時刻までの区間になります。SRTは `Command+S`、または `Ctrl+S` で上書き保存します。
+字幕間の `+` を押すと、その位置に空字幕を追加します。新しい字幕は基本2秒間で、次の字幕が近い場合は次の開始時刻までの区間になります。SRTは `Command+S`、または `Ctrl+S` で上書き保存します。データセット出力では `master.jsonl`、Qwen2.5-VL用JSONL、LLaVA用JSON、TRL/SFTTrainer用JSONLをチェックボックスで選択できます。`master.jsonl` はデフォルトONです。
 
 この段階では、文字起こし機能は実装していません。
 
@@ -23,6 +23,8 @@ backend/
   app/
 frontend/
   src/
+    core/
+    exporters/
 ```
 
 ## Backend
@@ -70,7 +72,7 @@ API:
 - `POST /api/srt`: SRTファイルを `dataset/annotations/` に保存し、字幕配列を返します。同名ファイルがある場合は `_001` のような連番を付けます。
 - `POST /api/srt/parse`: SRTファイルを保存せずにパース結果だけ返します。
 - `POST /api/srt/save`: 画面で編集・追加・削除した字幕本文と区間を、読み込み済みSRTファイルへ上書き保存します。字幕をすべて削除した場合は空のSRTとして保存します。
-- `POST /api/master/utterances`: 編集済み字幕を発話単位で `dataset/annotations/master.jsonl` に書き出します。代表フレームが設定されている場合は `dataset/processed/frames/{video_id}/` に画像を書き出します。`export_clips: true` の場合は `dataset/processed/clips/{video_id}/` に動画クリップも書き出します。
+- `POST /api/master/utterances`: 編集済み字幕を内部master形式に正規化し、`dataset/annotations/master.jsonl` を更新します。代表フレーム画像は `dataset/processed/frames/{video_id}/`、動画クリップは `dataset/processed/clips/{video_id}/` に書き出します。選択された形式は `dataset/exports/export_.../` にまとめて出力します。
 
 `videos.jsonl` は読み込んだ動画の登録台帳です。現時点の `master.jsonl` 書き出しだけなら必須ではありませんが、複数動画の `video_id`、元ファイル名、保存先パスを後から確認できるように残しています。
 `video_id` は元動画ファイル名ベースで作成します。たとえば `テスト用2.mp4` は `video_テスト用2` になり、同じIDが既にある場合は `video_テスト用2_001` のように連番を付けます。
@@ -88,9 +90,37 @@ SRTの返却形式:
 ]
 ```
 
-`master.jsonl` の1行は発話1件です。動画クリップを書き出した場合は `clip_path` にクリップの相対パスが入ります。代表フレームを設定した場合は `representative_frame_path` と `frame_paths` に画像パスが入ります。クリップ書き出し時は、同じ `video_id` の古いクリップを削除してから現在の編集済み区間だけを書き出します。
+`master.jsonl` の1行は発話1件です。`clip_path` にクリップの相対パス、`representative_frame_path`、`image_path`、`frame_paths` に代表フレーム画像パスが入ります。書き出し時は、同じ `video_id` の古いクリップと代表フレームを削除してから現在の編集済み区間だけを書き出します。
 アプリ上で直接打ち込み編集した発話区間は、`start_time`、`end_time`、`duration` に反映されます。
 動画クリップは区間の正確さを優先し、ffmpeg の `libx264 -crf 18 -preset veryfast` で高品質再エンコードします。
+
+モデル別出力は必ず内部master形式を経由します。出力前に、`id`、`start_time`、`end_time`、`instruction`、`answer`、`split`、`image_path`、`clip_path` が揃っているかを検証します。字幕本文が空、代表フレーム未設定、区間不正の場合は出力せずエラーにします。
+
+出力フォルダ例:
+
+```text
+dataset/exports/export_20260708T120000Z_video_example/
+  manifest.json
+  media/
+    clips/
+    frames/
+  master/
+    master.jsonl
+  qwen/
+    train.jsonl
+    val.jsonl
+    test.jsonl
+  llava/
+    train.json
+    val.json
+    test.json
+  trl/
+    train.jsonl
+    val.jsonl
+    test.jsonl
+```
+
+`manifest.json` には、出力日時、件数、選択形式、データ分割、アプリバージョン、出力ファイル一覧が入ります。
 
 ```json
 {
@@ -101,11 +131,15 @@ SRTの返却形式:
   "duration": 6.3,
   "video_path": "dataset/raw/videos/example.mp4",
   "clip_path": "dataset/processed/clips/video_001/sample_000001.mp4",
+  "image_path": "dataset/processed/frames/video_001/sample_000001.jpg",
   "representative_frame_path": "dataset/processed/frames/video_001/sample_000001.jpg",
   "frame_paths": [
     "dataset/processed/frames/video_001/sample_000001.jpg"
   ],
   "representative_time": 75.2,
+  "instruction": "この歩行動画クリップと代表フレームを見て、発話内容を答えてください。",
+  "answer": "edited subtitle text",
+  "split": "train",
   "transcript": "edited subtitle text",
   "scene_description": "",
   "notes": "",

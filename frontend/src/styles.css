@@ -84,6 +84,52 @@ textarea {
   padding: 9px;
 }
 
+.export-format-field {
+  display: grid;
+  gap: 7px;
+  min-width: 300px;
+  margin: 0;
+  border: 1px solid #c9d4da;
+  border-radius: 6px;
+  background: #fbfcfd;
+  padding: 8px 10px 10px;
+}
+
+.export-format-field legend {
+  color: #40515c;
+  font-size: 13px;
+  font-weight: 700;
+  padding: 0 4px;
+}
+
+.export-format-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px 10px;
+}
+
+.export-format-option {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  color: #2f4652;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.export-format-option input {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+}
+
+.export-format-option span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .export-button {
   align-self: end;
   min-height: 42px;
@@ -571,5 +617,13 @@ textarea {
 
   .file-field {
     min-width: 100%;
+  }
+
+  .export-format-field {
+    min-width: 100%;
+  }
+
+  .export-format-options {
+    grid-template-columns: 1fr;
   }
 }
