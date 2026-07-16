@@ -801,7 +801,7 @@ def export_utterances(request: MasterExportRequest) -> MasterExportResponse:
         export_record["original_clip_path"] = record["clip_path"]
         export_record["original_image_path"] = record["image_path"]
         export_record["clip_path"] = export_media_file(record["clip_path"], export_root, "clips")
-        export_record["image_path"] = export_media_file(record["image_path"], export_root, "frames")
+        export_record["image_path"] = export_media_file(record["image_path"], export_root, "images")
         export_record["representative_frame_path"] = export_record["image_path"]
         export_record["frame_paths"] = [export_record["image_path"]]
         export_records.append(export_record)

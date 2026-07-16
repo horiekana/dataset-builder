@@ -103,7 +103,7 @@ dataset/exports/export_20260708T120000Z_video_example/
   manifest.json
   media/
     clips/
-    frames/
+    images/
   master/
     master.jsonl
   qwen/
