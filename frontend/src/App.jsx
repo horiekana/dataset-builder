@@ -108,6 +108,7 @@ export default function App() {
   const [currentVideoTime, setCurrentVideoTime] = useState(0);
   const [isUploadingVideo, setIsUploadingVideo] = useState(false);
   const [isUploadingSrt, setIsUploadingSrt] = useState(false);
+  const [isTranscribing, setIsTranscribing] = useState(false);
   const [isSavingSrt, setIsSavingSrt] = useState(false);
   const [isExportingMaster, setIsExportingMaster] = useState(false);
   const [isExportingClips, setIsExportingClips] = useState(false);
@@ -123,11 +124,25 @@ export default function App() {
 
   const activityMessage = isExportingClips
     ? "選択された形式のデータセットを書き出しています..."
+    : isTranscribing
+    ? "faster-whisperで文字起こししています..."
     : isSavingSrt
     ? "SRTを保存しています..."
     : isExportingMaster
     ? "master.jsonlに書き出しています..."
     : "ファイルを読み込んでいます...";
+
+  function normalizeLoadedSubtitles(result) {
+    return {
+      ...result,
+      subtitles: result.subtitles.map((subtitle) => ({
+        ...subtitle,
+        start_time_input: formatSeconds(subtitle.start_time),
+        end_time_input: formatSeconds(subtitle.end_time),
+        representative_time: null,
+      })),
+    };
+  }
 
   function toggleExportFormat(format) {
     setSelectedExportFormats((currentFormats) => {
@@ -167,20 +182,38 @@ export default function App() {
     setIsUploadingSrt(true);
     try {
       const result = await uploadFile("/api/srt", file);
-      setSrt({
-        ...result,
-        subtitles: result.subtitles.map((subtitle) => ({
-          ...subtitle,
-          start_time_input: formatSeconds(subtitle.start_time),
-          end_time_input: formatSeconds(subtitle.end_time),
-          representative_time: null,
-        })),
-      });
+      setSrt(normalizeLoadedSubtitles(result));
       setActiveSubtitleIndex(null);
     } catch (uploadError) {
       setError(uploadError.message);
     } finally {
       setIsUploadingSrt(false);
+    }
+  }
+
+  async function transcribeVideo() {
+    if (!video) {
+      setError("先に動画ファイルを選択してください。");
+      return;
+    }
+
+    setError("");
+    setStatusMessage("");
+    setIsTranscribing(true);
+    try {
+      const result = await postJson("/api/transcribe", {
+        video_id: video.video_id,
+        video_path: video.stored_path,
+        model_size: "base",
+        language: "ja",
+      });
+      setSrt(normalizeLoadedSubtitles(result));
+      setActiveSubtitleIndex(null);
+      setStatusMessage(`${result.filename} を ${result.subtitles.length} 件の字幕下書きとして作成しました。`);
+    } catch (transcribeError) {
+      setError(transcribeError.message);
+    } finally {
+      setIsTranscribing(false);
     }
   }
 
@@ -422,7 +455,7 @@ export default function App() {
     function handleKeyDown(event) {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "s") {
         event.preventDefault();
-        if (!isSavingSrt && !isExportingMaster && !isExportingClips) {
+        if (!isSavingSrt && !isExportingMaster && !isExportingClips && !isTranscribing) {
           saveSrtFile();
         }
       }
@@ -529,6 +562,14 @@ export default function App() {
           <span>SRT字幕</span>
           <input type="file" accept=".srt" onChange={handleSrtChange} />
         </label>
+        <button
+          className="export-button secondary"
+          disabled={!video || isUploadingVideo || isUploadingSrt || isTranscribing || isSavingSrt || isExportingClips}
+          onClick={transcribeVideo}
+          type="button"
+        >
+          {isTranscribing ? "文字起こし中..." : "動画から文字起こし"}
+        </button>
         <fieldset className="export-format-field">
           <legend>出力形式</legend>
           <div className="export-format-options">
@@ -536,7 +577,7 @@ export default function App() {
               <label className="export-format-option" key={option.id}>
                 <input
                   checked={selectedExportFormats.includes(option.id)}
-                  disabled={isSavingSrt || isExportingMaster || isExportingClips}
+                  disabled={isTranscribing || isSavingSrt || isExportingMaster || isExportingClips}
                   onChange={() => toggleExportFormat(option.id)}
                   type="checkbox"
                 />
@@ -552,6 +593,7 @@ export default function App() {
             !srt?.subtitles?.length ||
             !selectedExportFormats.length ||
             isSavingSrt ||
+            isTranscribing ||
             isExportingMaster ||
             isExportingClips
           }
@@ -562,7 +604,7 @@ export default function App() {
         </button>
       </section>
 
-      {(isUploadingVideo || isUploadingSrt || isSavingSrt || isExportingMaster || isExportingClips || statusMessage || error) && (
+      {(isUploadingVideo || isUploadingSrt || isTranscribing || isSavingSrt || isExportingMaster || isExportingClips || statusMessage || error) && (
         <div className={error ? "message error" : "message"}>
           {error || statusMessage || activityMessage}
         </div>
@@ -616,7 +658,7 @@ export default function App() {
               <div className="subtitle-insert-divider">
                 <button
                   aria-label="この位置に字幕を追加"
-                  disabled={isSavingSrt || isExportingMaster || isExportingClips}
+                  disabled={isTranscribing || isSavingSrt || isExportingMaster || isExportingClips}
                   onClick={() => addSubtitleAtPosition(0)}
                   type="button"
                 >
@@ -705,7 +747,7 @@ export default function App() {
                   <div className="subtitle-insert-divider">
                     <button
                       aria-label="この位置に字幕を追加"
-                      disabled={isSavingSrt || isExportingMaster || isExportingClips}
+                      disabled={isTranscribing || isSavingSrt || isExportingMaster || isExportingClips}
                       onClick={() => addSubtitleAtPosition(idx + 1)}
                       type="button"
                     >
@@ -718,7 +760,7 @@ export default function App() {
               <div className="subtitle-insert-divider">
                 <button
                   aria-label="この位置に字幕を追加"
-                  disabled={isSavingSrt || isExportingMaster || isExportingClips}
+                  disabled={isTranscribing || isSavingSrt || isExportingMaster || isExportingClips}
                   onClick={() => addSubtitleAtPosition(srt.subtitles.length)}
                   type="button"
                 >
@@ -730,7 +772,7 @@ export default function App() {
             <div className="empty-state">
               <button
                 className="subtitle-add-empty-button"
-                disabled={isSavingSrt || isExportingMaster || isExportingClips}
+                disabled={isTranscribing || isSavingSrt || isExportingMaster || isExportingClips}
                 onClick={() => addSubtitleAtPosition(0)}
                 type="button"
               >

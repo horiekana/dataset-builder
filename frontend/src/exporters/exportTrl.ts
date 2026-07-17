@@ -7,8 +7,17 @@ function toTrlRecord(record: MasterRecord) {
     image: record.image_path,
     video: record.clip_path,
     messages: [
-      { role: "user", content: record.instruction },
-      { role: "assistant", content: record.answer },
+      {
+        role: "user",
+        content: [
+          { type: "image" },
+          { type: "text", text: record.instruction },
+        ],
+      },
+      {
+        role: "assistant",
+        content: [{ type: "text", text: record.answer }],
+      },
     ],
     start_time: record.start_time,
     end_time: record.end_time,

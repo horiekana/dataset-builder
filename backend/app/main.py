@@ -20,6 +20,7 @@ RAW_VIDEO_DIR = DATASET_DIR / "raw" / "videos"
 ANNOTATION_DIR = DATASET_DIR / "annotations"
 PROCESSED_CLIP_DIR = DATASET_DIR / "processed" / "clips"
 PROCESSED_FRAME_DIR = DATASET_DIR / "processed" / "frames"
+PROCESSED_AUDIO_DIR = DATASET_DIR / "processed" / "audio"
 EXPORT_DIR = DATASET_DIR / "exports"
 VIDEOS_JSONL = ANNOTATION_DIR / "videos.jsonl"
 MASTER_JSONL = ANNOTATION_DIR / "master.jsonl"
@@ -62,6 +63,13 @@ class SrtSaveResponse(BaseModel):
     count: int
 
 
+class TranscribeRequest(BaseModel):
+    video_id: str
+    video_path: str
+    model_size: str = "base"
+    language: str = "ja"
+
+
 class MasterSubtitleInput(BaseModel):
     index: int | None = None
     start_time: float
@@ -96,6 +104,7 @@ def ensure_dataset_dirs() -> None:
         ANNOTATION_DIR,
         PROCESSED_CLIP_DIR,
         PROCESSED_FRAME_DIR,
+        PROCESSED_AUDIO_DIR,
         EXPORT_DIR,
     ):
         directory.mkdir(parents=True, exist_ok=True)
@@ -437,6 +446,101 @@ def write_representative_frame(video_path: Path, video_id: str, sample_id: str, 
     return relative_to_root(output_path)
 
 
+def extract_audio_for_transcription(video_path: Path, video_id: str) -> Path:
+    ffmpeg_path = shutil.which("ffmpeg")
+    if not ffmpeg_path:
+        raise HTTPException(status_code=500, detail="ffmpeg is not installed")
+
+    audio_dir = (PROCESSED_AUDIO_DIR / video_id).resolve()
+    try:
+        audio_dir.relative_to(PROCESSED_AUDIO_DIR.resolve())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid video_id") from exc
+
+    audio_dir.mkdir(parents=True, exist_ok=True)
+    output_path = audio_dir / "transcription.wav"
+    command = [
+        ffmpeg_path,
+        "-y",
+        "-i",
+        str(video_path),
+        "-vn",
+        "-ac",
+        "1",
+        "-ar",
+        "16000",
+        "-c:a",
+        "pcm_s16le",
+        str(output_path),
+    ]
+
+    result = subprocess.run(command, capture_output=True, text=True)
+    if result.returncode != 0:
+        detail = result.stderr.strip().splitlines()[-1] if result.stderr.strip() else "ffmpeg failed"
+        raise HTTPException(status_code=500, detail=f"Failed to extract audio: {detail}")
+
+    return output_path
+
+
+def transcribe_audio(audio_path: Path, model_size: str, language: str) -> list[SubtitleItem]:
+    try:
+        from faster_whisper import WhisperModel
+    except ImportError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail="faster-whisper がインストールされていません。`cd backend && source .venv/bin/activate && pip install -r requirements.txt` を実行してください。",
+        ) from exc
+
+    try:
+        model = WhisperModel(model_size, device="cpu", compute_type="int8")
+        segments, _info = model.transcribe(
+            str(audio_path),
+            language=language or None,
+            vad_filter=True,
+            beam_size=5,
+            word_timestamps=True,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Transcription failed: {exc}") from exc
+
+    subtitles: list[SubtitleItem] = []
+    for idx, segment in enumerate(segments, start=1):
+        text = segment.text.strip()
+        if not text:
+            continue
+        start_time, end_time = segment_speech_bounds(segment)
+        subtitles.append(
+            SubtitleItem(
+                index=idx,
+                start_time=round(start_time, 3),
+                end_time=round(end_time, 3),
+                text=text,
+            )
+        )
+
+    return subtitles
+
+
+def segment_speech_bounds(segment: object) -> tuple[float, float]:
+    words = getattr(segment, "words", None) or []
+    timed_words = [
+        word
+        for word in words
+        if getattr(word, "start", None) is not None and getattr(word, "end", None) is not None
+    ]
+    if timed_words:
+        return float(timed_words[0].start), float(timed_words[-1].end)
+
+    return float(segment.start), float(segment.end)
+
+
+def save_transcribed_srt(video_path: Path, subtitles: list[SubtitleItem]) -> Path:
+    filename = safe_filename(f"{video_path.stem}_transcribed.srt")
+    destination = unique_path(ANNOTATION_DIR, filename)
+    destination.write_text(build_srt(subtitles), encoding="utf-8")
+    return destination
+
+
 def write_export_jsonl(path: Path, records: list[dict]) -> str:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as handle:
@@ -580,8 +684,19 @@ def trl_record(record: dict) -> dict:
         "image": record["image_path"],
         "video": record["clip_path"],
         "messages": [
-            {"role": "user", "content": record["instruction"]},
-            {"role": "assistant", "content": record["answer"]},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image"},
+                    {"type": "text", "text": record["instruction"]},
+                ],
+            },
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": record["answer"]},
+                ],
+            },
         ],
         "start_time": record["start_time"],
         "end_time": record["end_time"],
@@ -704,6 +819,30 @@ def save_srt(request: SrtSaveRequest) -> SrtSaveResponse:
     return SrtSaveResponse(
         path=relative_to_root(stored_path),
         count=len(request.subtitles),
+    )
+
+
+@app.post("/api/transcribe", response_model=SrtUploadResponse)
+def transcribe_video(request: TranscribeRequest) -> SrtUploadResponse:
+    ensure_dataset_dirs()
+    if not request.video_id:
+        raise HTTPException(status_code=400, detail="video_id is required")
+
+    video_path = resolve_dataset_path(request.video_path)
+    if not video_path.exists():
+        raise HTTPException(status_code=404, detail="Video file not found")
+
+    audio_path = extract_audio_for_transcription(video_path, request.video_id)
+    subtitles = transcribe_audio(audio_path, request.model_size, request.language)
+    if not subtitles:
+        raise HTTPException(status_code=500, detail="文字起こし結果が空でした。音声が含まれているか確認してください。")
+
+    stored_path = save_transcribed_srt(video_path, subtitles)
+    return SrtUploadResponse(
+        subtitle_id=f"srt_{Path(stored_path).stem}",
+        filename=stored_path.name,
+        stored_path=relative_to_root(stored_path),
+        subtitles=subtitles,
     )
 
 
