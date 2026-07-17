@@ -113,6 +113,7 @@ export default function App() {
   const [isExportingMaster, setIsExportingMaster] = useState(false);
   const [isExportingClips, setIsExportingClips] = useState(false);
   const [selectedExportFormats, setSelectedExportFormats] = useState(DEFAULT_EXPORT_FORMATS);
+  const [transcriptionModelSize, setTranscriptionModelSize] = useState("base");
   const [statusMessage, setStatusMessage] = useState("");
   const [copyMessage, setCopyMessage] = useState("");
   const [error, setError] = useState("");
@@ -204,7 +205,7 @@ export default function App() {
       const result = await postJson("/api/transcribe", {
         video_id: video.video_id,
         video_path: video.stored_path,
-        model_size: "base",
+        model_size: transcriptionModelSize,
         language: "ja",
       });
       setSrt(normalizeLoadedSubtitles(result));
@@ -561,6 +562,17 @@ export default function App() {
         <label className="file-field">
           <span>SRT字幕</span>
           <input type="file" accept=".srt" onChange={handleSrtChange} />
+        </label>
+        <label className="select-field">
+          <span>Whisperモデル</span>
+          <select
+            disabled={isUploadingVideo || isUploadingSrt || isTranscribing || isSavingSrt || isExportingClips}
+            onChange={(event) => setTranscriptionModelSize(event.target.value)}
+            value={transcriptionModelSize}
+          >
+            <option value="base">base</option>
+            <option value="small">small</option>
+          </select>
         </label>
         <button
           className="export-button secondary"

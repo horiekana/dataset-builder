@@ -55,7 +55,7 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-`faster-whisper` は初回の文字起こし時にモデルをダウンロードします。まずは `base` モデル、日本語指定で字幕下書きを作成します。
+`faster-whisper` は初回の文字起こし時にモデルをダウンロードします。文字起こしでは `base` と `small` を選択できます。まずは軽い `base`、精度を上げたい場合は `small` を使います。
 
 別の場所から続けて:
 

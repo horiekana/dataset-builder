@@ -64,19 +64,22 @@ textarea {
   background: #ffffff;
 }
 
-.file-field {
+.file-field,
+.select-field {
   display: grid;
   gap: 6px;
   min-width: 260px;
 }
 
-.file-field span {
+.file-field span,
+.select-field span {
   font-size: 13px;
   font-weight: 700;
   color: #40515c;
 }
 
-.file-field input {
+.file-field input,
+.select-field select {
   width: 100%;
   border: 1px solid #c9d4da;
   border-radius: 6px;
@@ -615,7 +618,8 @@ textarea {
     grid-template-columns: 1fr;
   }
 
-  .file-field {
+  .file-field,
+  .select-field {
     min-width: 100%;
   }
 
