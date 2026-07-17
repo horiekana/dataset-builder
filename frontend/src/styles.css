@@ -55,13 +55,33 @@ textarea {
 }
 
 .toolbar {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(360px, 0.42fr);
   gap: 12px;
+  align-items: stretch;
+}
+
+.toolbar-card {
+  display: flex;
   flex-wrap: wrap;
-  padding: 14px;
+  gap: 12px;
+  align-items: end;
   border: 1px solid #d8e0e4;
   border-radius: 8px;
   background: #ffffff;
+  padding: 14px;
+}
+
+.import-card {
+  display: grid;
+  grid-template-columns: minmax(260px, 1fr) minmax(320px, 1.35fr);
+  align-items: start;
+  min-width: 0;
+}
+
+.export-card {
+  align-content: start;
+  align-items: start;
 }
 
 .file-field,
@@ -69,6 +89,28 @@ textarea {
   display: grid;
   gap: 6px;
   min-width: 260px;
+}
+
+.file-field {
+  flex: 1 1 300px;
+}
+
+.subtitle-import-group {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+
+.transcribe-controls {
+  display: flex;
+  align-items: end;
+  gap: 12px;
+}
+
+.select-field {
+  flex: 0 0 130px;
+  min-width: 130px;
+  width: 130px;
 }
 
 .file-field span,
@@ -90,7 +132,7 @@ textarea {
 .export-format-field {
   display: grid;
   gap: 7px;
-  min-width: 300px;
+  width: 100%;
   margin: 0;
   border: 1px solid #c9d4da;
   border-radius: 6px;
@@ -169,6 +211,10 @@ textarea {
 .export-button.secondary:hover:not(:disabled),
 .export-button.secondary:focus-visible {
   background: #edf5f8;
+}
+
+.transcribe-button {
+  min-width: 120px;
 }
 
 .message {
@@ -608,6 +654,14 @@ textarea {
     grid-template-columns: 1fr;
   }
 
+  .toolbar {
+    grid-template-columns: 1fr;
+  }
+
+  .import-card {
+    grid-template-columns: 1fr;
+  }
+
   .subtitle-list {
     max-height: 520px;
   }
@@ -621,6 +675,16 @@ textarea {
   .file-field,
   .select-field {
     min-width: 100%;
+    width: 100%;
+  }
+
+  .transcribe-button {
+    width: 100%;
+  }
+
+  .transcribe-controls {
+    display: grid;
+    grid-template-columns: 1fr;
   }
 
   .export-format-field {

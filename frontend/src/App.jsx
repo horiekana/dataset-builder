@@ -554,66 +554,74 @@ export default function App() {
         <div className="status-pill">master.jsonl 未保存</div>
       </header>
 
-      <section className="toolbar" aria-label="ファイル読み込み">
-        <label className="file-field">
-          <span>動画ファイル</span>
-          <input type="file" accept="video/*,.mkv" onChange={handleVideoChange} />
-        </label>
-        <label className="file-field">
-          <span>SRT字幕</span>
-          <input type="file" accept=".srt" onChange={handleSrtChange} />
-        </label>
-        <label className="select-field">
-          <span>Whisperモデル</span>
-          <select
-            disabled={isUploadingVideo || isUploadingSrt || isTranscribing || isSavingSrt || isExportingClips}
-            onChange={(event) => setTranscriptionModelSize(event.target.value)}
-            value={transcriptionModelSize}
-          >
-            <option value="base">base</option>
-            <option value="small">small</option>
-          </select>
-        </label>
-        <button
-          className="export-button secondary"
-          disabled={!video || isUploadingVideo || isUploadingSrt || isTranscribing || isSavingSrt || isExportingClips}
-          onClick={transcribeVideo}
-          type="button"
-        >
-          {isTranscribing ? "文字起こし中..." : "動画から文字起こし"}
-        </button>
-        <fieldset className="export-format-field">
-          <legend>出力形式</legend>
-          <div className="export-format-options">
-            {EXPORT_FORMAT_OPTIONS.map((option) => (
-              <label className="export-format-option" key={option.id}>
-                <input
-                  checked={selectedExportFormats.includes(option.id)}
-                  disabled={isTranscribing || isSavingSrt || isExportingMaster || isExportingClips}
-                  onChange={() => toggleExportFormat(option.id)}
-                  type="checkbox"
-                />
-                <span>{option.label}</span>
+      <section className="toolbar" aria-label="ファイル読み込みと書き出し">
+        <div className="toolbar-card import-card" aria-label="インポート">
+          <label className="file-field">
+            <span>動画ファイル</span>
+            <input type="file" accept="video/*,.mkv" onChange={handleVideoChange} />
+          </label>
+          <div className="subtitle-import-group">
+            <label className="file-field">
+              <span>SRT字幕</span>
+              <input type="file" accept=".srt" onChange={handleSrtChange} />
+            </label>
+            <div className="transcribe-controls">
+              <label className="select-field">
+                <span>Whisperモデル</span>
+                <select
+                  disabled={isUploadingVideo || isUploadingSrt || isTranscribing || isSavingSrt || isExportingClips}
+                  onChange={(event) => setTranscriptionModelSize(event.target.value)}
+                  value={transcriptionModelSize}
+                >
+                  <option value="base">base</option>
+                  <option value="small">small</option>
+                </select>
               </label>
-            ))}
+              <button
+                className="export-button secondary transcribe-button"
+                disabled={!video || isUploadingVideo || isUploadingSrt || isTranscribing || isSavingSrt || isExportingClips}
+                onClick={transcribeVideo}
+                type="button"
+              >
+                {isTranscribing ? "文字起こし中..." : "文字起こし"}
+              </button>
+            </div>
           </div>
-        </fieldset>
-        <button
-          className="export-button"
-          disabled={
-            !video ||
-            !srt?.subtitles?.length ||
-            !selectedExportFormats.length ||
-            isSavingSrt ||
-            isTranscribing ||
-            isExportingMaster ||
-            isExportingClips
-          }
-          onClick={exportSelectedDataset}
-          type="button"
-        >
-          {isExportingClips ? "書き出し中..." : "選択形式を書き出す"}
-        </button>
+        </div>
+        <div className="toolbar-card export-card" aria-label="書き出し">
+          <fieldset className="export-format-field">
+            <legend>出力形式</legend>
+            <div className="export-format-options">
+              {EXPORT_FORMAT_OPTIONS.map((option) => (
+                <label className="export-format-option" key={option.id}>
+                  <input
+                    checked={selectedExportFormats.includes(option.id)}
+                    disabled={isTranscribing || isSavingSrt || isExportingMaster || isExportingClips}
+                    onChange={() => toggleExportFormat(option.id)}
+                    type="checkbox"
+                  />
+                  <span>{option.label}</span>
+                </label>
+              ))}
+            </div>
+          </fieldset>
+          <button
+            className="export-button"
+            disabled={
+              !video ||
+              !srt?.subtitles?.length ||
+              !selectedExportFormats.length ||
+              isSavingSrt ||
+              isTranscribing ||
+              isExportingMaster ||
+              isExportingClips
+            }
+            onClick={exportSelectedDataset}
+            type="button"
+          >
+            {isExportingClips ? "書き出し中..." : "書き出し"}
+          </button>
+        </div>
       </section>
 
       {(isUploadingVideo || isUploadingSrt || isTranscribing || isSavingSrt || isExportingMaster || isExportingClips || statusMessage || error) && (
