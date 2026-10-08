@@ -98,6 +98,17 @@ async function postJson(endpoint, payload) {
   return response.json();
 }
 
+async function getJson(endpoint) {
+  const response = await fetch(`${API_BASE}${endpoint}`);
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => null);
+    throw new Error(error?.detail || "Request failed");
+  }
+
+  return response.json();
+}
+
 export default function App() {
   const videoRef = useRef(null);
   const copyToastTimerRef = useRef(null);
@@ -114,6 +125,9 @@ export default function App() {
   const [isExportingClips, setIsExportingClips] = useState(false);
   const [selectedExportFormats, setSelectedExportFormats] = useState(DEFAULT_EXPORT_FORMATS);
   const [transcriptionModelSize, setTranscriptionModelSize] = useState("base");
+  const [datasetDir, setDatasetDir] = useState("");
+  const [datasetDirInput, setDatasetDirInput] = useState("");
+  const [isSavingDatasetDir, setIsSavingDatasetDir] = useState(false);
   const [statusMessage, setStatusMessage] = useState("");
   const [copyMessage, setCopyMessage] = useState("");
   const [error, setError] = useState("");
@@ -125,6 +139,8 @@ export default function App() {
 
   const activityMessage = isExportingClips
     ? "選択された形式のデータセットを書き出しています..."
+    : isSavingDatasetDir
+    ? "データ保存先を変更しています..."
     : isTranscribing
     ? "faster-whisperで文字起こししています..."
     : isSavingSrt
@@ -143,6 +159,57 @@ export default function App() {
         representative_time: null,
       })),
     };
+  }
+
+  useEffect(() => {
+    let ignore = false;
+
+    async function loadDatasetSettings() {
+      try {
+        const result = await getJson("/api/settings/dataset");
+        if (ignore) return;
+        setDatasetDir(result.dataset_dir);
+        setDatasetDirInput(result.dataset_dir);
+      } catch (settingsError) {
+        if (!ignore) {
+          setError(settingsError.message);
+        }
+      }
+    }
+
+    loadDatasetSettings();
+
+    return () => {
+      ignore = true;
+    };
+  }, []);
+
+  async function saveDatasetDir() {
+    if (!datasetDirInput.trim()) {
+      setError("データ保存先を入力してください。");
+      return;
+    }
+
+    setError("");
+    setStatusMessage("");
+    setIsSavingDatasetDir(true);
+    try {
+      const result = await postJson("/api/settings/dataset", {
+        dataset_dir: datasetDirInput,
+      });
+      setDatasetDir(result.dataset_dir);
+      setDatasetDirInput(result.dataset_dir);
+      setVideo(null);
+      setSrt(null);
+      setActiveSubtitleIndex(null);
+      stopAtTimeRef.current = null;
+      setCurrentVideoTime(0);
+      setStatusMessage("データ保存先を変更しました。動画とSRTを読み込み直してください。");
+    } catch (settingsError) {
+      setError(settingsError.message);
+    } finally {
+      setIsSavingDatasetDir(false);
+    }
   }
 
   function toggleExportFormat(format) {
@@ -351,6 +418,35 @@ export default function App() {
     });
   }
 
+  function autoSetMissingRepresentativeFrames() {
+    setSrt((currentSrt) => {
+      if (!currentSrt?.subtitles?.length) {
+        setError("字幕がありません。");
+        return currentSrt;
+      }
+
+      let updatedCount = 0;
+      const subtitles = currentSrt.subtitles.map((subtitle) => {
+        if (subtitle.representative_time !== null && subtitle.representative_time !== undefined) {
+          return subtitle;
+        }
+        if (subtitle.end_time <= subtitle.start_time) {
+          return subtitle;
+        }
+
+        updatedCount += 1;
+        return {
+          ...subtitle,
+          representative_time: subtitle.start_time + (subtitle.end_time - subtitle.start_time) / 2,
+        };
+      });
+
+      setError("");
+      setStatusMessage(`${updatedCount} 件の代表フレームを区間中央に自動設定しました。`);
+      return { ...currentSrt, subtitles };
+    });
+  }
+
   function addSubtitleAtPosition(insertIndex) {
     setSrt((currentSrt) => {
       if (!currentSrt) {
@@ -554,6 +650,26 @@ export default function App() {
         <div className="status-pill">master.jsonl 未保存</div>
       </header>
 
+      <section className="dataset-settings-card" aria-label="データ保存先">
+        <label className="dataset-dir-field">
+          <span>データ保存先</span>
+          <input
+            onChange={(event) => setDatasetDirInput(event.target.value)}
+            placeholder="/Users/kanahorie/Documents/修士研究/歩行データセット"
+            type="text"
+            value={datasetDirInput}
+          />
+        </label>
+        <button
+          className="export-button secondary"
+          disabled={isSavingDatasetDir || !datasetDirInput.trim() || datasetDirInput === datasetDir}
+          onClick={saveDatasetDir}
+          type="button"
+        >
+          {isSavingDatasetDir ? "適用中..." : "適用"}
+        </button>
+      </section>
+
       <section className="toolbar" aria-label="ファイル読み込みと書き出し">
         <div className="toolbar-card import-card" aria-label="インポート">
           <label className="file-field">
@@ -624,7 +740,15 @@ export default function App() {
         </div>
       </section>
 
-      {(isUploadingVideo || isUploadingSrt || isTranscribing || isSavingSrt || isExportingMaster || isExportingClips || statusMessage || error) && (
+      {(isUploadingVideo ||
+        isUploadingSrt ||
+        isSavingDatasetDir ||
+        isTranscribing ||
+        isSavingSrt ||
+        isExportingMaster ||
+        isExportingClips ||
+        statusMessage ||
+        error) && (
         <div className={error ? "message error" : "message"}>
           {error || statusMessage || activityMessage}
         </div>
@@ -672,6 +796,14 @@ export default function App() {
               <h2>字幕一覧</h2>
               <span>{srt ? `${srt.subtitles.length} 件` : "未選択"}</span>
             </div>
+            <button
+              className="pane-action-button"
+              disabled={!srt?.subtitles?.length || isTranscribing || isSavingSrt || isExportingMaster || isExportingClips}
+              onClick={autoSetMissingRepresentativeFrames}
+              type="button"
+            >
+              代表フレーム自動設定
+            </button>
           </div>
           {srt?.subtitles?.length ? (
             <div className="subtitle-list">

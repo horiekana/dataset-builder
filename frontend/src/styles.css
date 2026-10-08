@@ -54,6 +54,38 @@ textarea {
   background: #ffffff;
 }
 
+.dataset-settings-card {
+  display: flex;
+  align-items: end;
+  gap: 12px;
+  margin-bottom: 12px;
+  border: 1px solid #d8e0e4;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 12px 14px;
+}
+
+.dataset-dir-field {
+  display: grid;
+  flex: 1 1 auto;
+  gap: 6px;
+  min-width: 0;
+}
+
+.dataset-dir-field span {
+  font-size: 13px;
+  font-weight: 700;
+  color: #40515c;
+}
+
+.dataset-dir-field input {
+  width: 100%;
+  border: 1px solid #c9d4da;
+  border-radius: 6px;
+  background: #fbfcfd;
+  padding: 9px;
+}
+
 .toolbar {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(360px, 0.42fr);
@@ -292,6 +324,34 @@ textarea {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.pane-action-button {
+  flex: 0 0 auto;
+  min-height: 34px;
+  border: 1px solid #8aa1ad;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #2f4652;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 700;
+  padding: 0 10px;
+}
+
+.pane-action-button:hover:not(:disabled),
+.pane-action-button:focus-visible {
+  background: #edf5f8;
+}
+
+.pane-action-button:focus-visible {
+  outline: 2px solid #247e9f;
+  outline-offset: 2px;
+}
+
+.pane-action-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
 }
 
 .video-player {
@@ -668,6 +728,10 @@ textarea {
 }
 
 @media (max-width: 560px) {
+  .dataset-settings-card {
+    display: grid;
+  }
+
   .subtitle-row {
     grid-template-columns: 1fr;
   }

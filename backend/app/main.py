@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -15,15 +16,67 @@ from pydantic import BaseModel, Field
 
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
-DATASET_DIR = ROOT_DIR / "dataset"
-RAW_VIDEO_DIR = DATASET_DIR / "raw" / "videos"
-ANNOTATION_DIR = DATASET_DIR / "annotations"
-PROCESSED_CLIP_DIR = DATASET_DIR / "processed" / "clips"
-PROCESSED_FRAME_DIR = DATASET_DIR / "processed" / "frames"
-PROCESSED_AUDIO_DIR = DATASET_DIR / "processed" / "audio"
-EXPORT_DIR = DATASET_DIR / "exports"
-VIDEOS_JSONL = ANNOTATION_DIR / "videos.jsonl"
-MASTER_JSONL = ANNOTATION_DIR / "master.jsonl"
+
+
+def load_env_file(path: Path) -> None:
+    if not path.exists():
+        return
+
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip("\"'")
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
+def configured_dataset_dir() -> Path:
+    raw_value = os.getenv("DATASET_DIR", "").strip()
+    if not raw_value:
+        return ROOT_DIR / "dataset"
+
+    return normalize_dataset_dir(raw_value)
+
+
+def normalize_dataset_dir(raw_value: str) -> Path:
+    dataset_path = Path(raw_value).expanduser()
+    if not dataset_path.is_absolute():
+        dataset_path = ROOT_DIR / dataset_path
+    return dataset_path.resolve()
+
+
+load_env_file(ROOT_DIR / ".env")
+
+DATASET_VIRTUAL_ROOT = "dataset"
+DATASET_DIR = configured_dataset_dir()
+
+
+def configure_dataset_paths(dataset_dir: Path) -> None:
+    global DATASET_DIR
+    global RAW_VIDEO_DIR
+    global ANNOTATION_DIR
+    global PROCESSED_CLIP_DIR
+    global PROCESSED_FRAME_DIR
+    global PROCESSED_AUDIO_DIR
+    global EXPORT_DIR
+    global VIDEOS_JSONL
+    global MASTER_JSONL
+
+    DATASET_DIR = dataset_dir.resolve()
+    RAW_VIDEO_DIR = DATASET_DIR / "raw" / "videos"
+    ANNOTATION_DIR = DATASET_DIR / "annotations"
+    PROCESSED_CLIP_DIR = DATASET_DIR / "processed" / "clips"
+    PROCESSED_FRAME_DIR = DATASET_DIR / "processed" / "frames"
+    PROCESSED_AUDIO_DIR = DATASET_DIR / "processed" / "audio"
+    EXPORT_DIR = DATASET_DIR / "exports"
+    VIDEOS_JSONL = ANNOTATION_DIR / "videos.jsonl"
+    MASTER_JSONL = ANNOTATION_DIR / "master.jsonl"
+
+
+configure_dataset_paths(DATASET_DIR)
 
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm"}
 SRT_EXTENSIONS = {".srt"}
@@ -98,6 +151,39 @@ class MasterExportResponse(BaseModel):
     files: list[str] = []
 
 
+class DatasetSettingsResponse(BaseModel):
+    dataset_dir: str
+    virtual_root: str = DATASET_VIRTUAL_ROOT
+
+
+class DatasetSettingsRequest(BaseModel):
+    dataset_dir: str
+
+
+def write_env_value(path: Path, key: str, value: str) -> None:
+    lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+    next_lines: list[str] = []
+    found = False
+
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in line:
+            next_lines.append(line)
+            continue
+
+        current_key = line.split("=", 1)[0].strip()
+        if current_key == key:
+            next_lines.append(f"{key}={value}")
+            found = True
+        else:
+            next_lines.append(line)
+
+    if not found:
+        next_lines.append(f"{key}={value}")
+
+    path.write_text("\n".join(next_lines) + "\n", encoding="utf-8")
+
+
 def ensure_dataset_dirs() -> None:
     for directory in (
         RAW_VIDEO_DIR,
@@ -111,7 +197,14 @@ def ensure_dataset_dirs() -> None:
 
 
 def relative_to_root(path: Path) -> str:
-    return path.resolve().relative_to(ROOT_DIR.resolve()).as_posix()
+    resolved_path = path.resolve()
+    try:
+        dataset_relative = resolved_path.relative_to(DATASET_DIR.resolve())
+        if dataset_relative == Path("."):
+            return DATASET_VIRTUAL_ROOT
+        return (Path(DATASET_VIRTUAL_ROOT) / dataset_relative).as_posix()
+    except ValueError:
+        return resolved_path.relative_to(ROOT_DIR.resolve()).as_posix()
 
 
 def safe_filename(filename: str) -> str:
@@ -334,9 +427,18 @@ def write_jsonl(path: Path, records: list[dict]) -> None:
 
 
 def resolve_dataset_path(relative_path: str) -> Path:
-    requested_path = (ROOT_DIR / relative_path).resolve()
+    requested_relative = Path(relative_path)
+    if requested_relative.is_absolute():
+        requested_path = requested_relative.resolve()
+    else:
+        parts = requested_relative.parts
+        if parts and parts[0] == DATASET_VIRTUAL_ROOT:
+            requested_path = (DATASET_DIR / Path(*parts[1:])).resolve()
+        else:
+            requested_path = (DATASET_DIR / requested_relative).resolve()
+
     try:
-        requested_path.relative_to(ROOT_DIR.resolve())
+        requested_path.relative_to(DATASET_DIR.resolve())
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="Invalid dataset path") from exc
     return requested_path
@@ -746,6 +848,26 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@app.get("/api/settings/dataset", response_model=DatasetSettingsResponse)
+def get_dataset_settings() -> DatasetSettingsResponse:
+    return DatasetSettingsResponse(dataset_dir=str(DATASET_DIR))
+
+
+@app.post("/api/settings/dataset", response_model=DatasetSettingsResponse)
+def update_dataset_settings(request: DatasetSettingsRequest) -> DatasetSettingsResponse:
+    raw_dataset_dir = request.dataset_dir.strip()
+    if not raw_dataset_dir:
+        raise HTTPException(status_code=400, detail="データ保存先を入力してください。")
+
+    next_dataset_dir = normalize_dataset_dir(raw_dataset_dir)
+    configure_dataset_paths(next_dataset_dir)
+    ensure_dataset_dirs()
+    os.environ["DATASET_DIR"] = str(DATASET_DIR)
+    write_env_value(ROOT_DIR / ".env", "DATASET_DIR", str(DATASET_DIR))
+
+    return DatasetSettingsResponse(dataset_dir=str(DATASET_DIR))
+
+
 @app.post("/api/videos", response_model=VideoUploadResponse)
 def upload_video(file: Annotated[UploadFile, File(...)]) -> VideoUploadResponse:
     ensure_dataset_dirs()
@@ -771,7 +893,7 @@ def upload_video(file: Annotated[UploadFile, File(...)]) -> VideoUploadResponse:
 
 @app.get("/api/videos/{video_id}/stream")
 def stream_video(video_id: str, path: str) -> FileResponse:
-    requested_path = (ROOT_DIR / path).resolve()
+    requested_path = resolve_dataset_path(path)
 
     try:
         requested_path.relative_to(RAW_VIDEO_DIR.resolve())
