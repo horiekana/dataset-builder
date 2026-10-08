@@ -523,6 +523,12 @@ textarea {
   align-self: start;
 }
 
+.subtitle-main {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
 .subtitle-jump {
   display: grid;
   border: 1px solid #cfe0e6;
@@ -690,6 +696,51 @@ textarea {
   line-height: 1.55;
   padding: 9px 10px;
   white-space: pre-wrap;
+}
+
+.representative-preview {
+  display: grid;
+  min-height: 132px;
+  border: 1px solid #d9e3e8;
+  border-radius: 6px;
+  background: #f7fafb;
+  overflow: hidden;
+}
+
+.representative-preview-button {
+  display: block;
+  width: 100%;
+  min-height: 132px;
+  border: 0;
+  background: #101820;
+  cursor: pointer;
+  padding: 0;
+}
+
+.representative-preview-button:hover,
+.representative-preview-button:focus-visible {
+  filter: brightness(1.03);
+}
+
+.representative-preview-button:focus-visible {
+  outline: 2px solid #247e9f;
+  outline-offset: -2px;
+}
+
+.representative-preview img {
+  display: block;
+  width: 100%;
+  height: 132px;
+  object-fit: cover;
+}
+
+.representative-preview-empty {
+  display: grid;
+  min-height: 132px;
+  place-items: center;
+  color: #7a8a94;
+  font-size: 13px;
+  font-weight: 700;
 }
 
 .empty-state {

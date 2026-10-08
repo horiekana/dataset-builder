@@ -28,6 +28,18 @@ function secondsInputIsValid(value) {
   return Number.isFinite(parsed) && parsed >= 0;
 }
 
+function representativeFramePreviewUrl(video, subtitle) {
+  if (!video?.stored_path || subtitle.representative_time === null || subtitle.representative_time === undefined) {
+    return "";
+  }
+
+  const params = new URLSearchParams({
+    video_path: video.stored_path,
+    time: formatSeconds(subtitle.representative_time),
+  });
+  return `${API_BASE}/api/frame-preview?${params.toString()}`;
+}
+
 function createSubtitle(startTime = 0, endTime = startTime + 2) {
   return {
     index: null,
@@ -887,13 +899,33 @@ export default function App() {
                       </button>
                     </div>
                   </div>
-                  <textarea
-                    aria-label={`${formatTime(subtitle.start_time)} の字幕`}
-                    className="subtitle-editor"
-                    onChange={(event) => updateSubtitleText(idx, event.target.value)}
-                    rows={Math.max(2, subtitle.text.split("\n").length)}
-                    value={subtitle.text}
-                  />
+                  <div className="subtitle-main">
+                    <textarea
+                      aria-label={`${formatTime(subtitle.start_time)} の字幕`}
+                      className="subtitle-editor"
+                      onChange={(event) => updateSubtitleText(idx, event.target.value)}
+                      rows={Math.max(2, subtitle.text.split("\n").length)}
+                      value={subtitle.text}
+                    />
+                    <div className="representative-preview">
+                      {representativeFramePreviewUrl(video, subtitle) ? (
+                        <button
+                          aria-label="代表フレームの位置へ移動"
+                          className="representative-preview-button"
+                          onClick={() => jumpToRepresentativeFrame(subtitle, idx)}
+                          type="button"
+                        >
+                          <img
+                            alt=""
+                            loading="lazy"
+                            src={representativeFramePreviewUrl(video, subtitle)}
+                          />
+                        </button>
+                      ) : (
+                        <div className="representative-preview-empty">代表フレーム未設定</div>
+                      )}
+                    </div>
+                  </div>
                 </article>
                 {idx < srt.subtitles.length - 1 && (
                   <div className="subtitle-insert-divider">

@@ -11,7 +11,7 @@ from typing import Annotated
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field
 
 
@@ -548,6 +548,41 @@ def write_representative_frame(video_path: Path, video_id: str, sample_id: str, 
     return relative_to_root(output_path)
 
 
+def read_frame_preview(video_path: Path, frame_time: float) -> bytes:
+    ffmpeg_path = shutil.which("ffmpeg")
+    if not ffmpeg_path:
+        raise HTTPException(status_code=500, detail="ffmpeg is not installed")
+    if frame_time < 0:
+        raise HTTPException(status_code=400, detail="Frame time must be greater than or equal to 0")
+
+    command = [
+        ffmpeg_path,
+        "-ss",
+        f"{frame_time:.3f}",
+        "-i",
+        str(video_path),
+        "-frames:v",
+        "1",
+        "-vf",
+        "scale=480:-1",
+        "-q:v",
+        "3",
+        "-f",
+        "image2pipe",
+        "-vcodec",
+        "mjpeg",
+        "pipe:1",
+    ]
+
+    result = subprocess.run(command, capture_output=True)
+    if result.returncode != 0 or not result.stdout:
+        detail = result.stderr.decode("utf-8", errors="replace").strip().splitlines()
+        message = detail[-1] if detail else "ffmpeg failed"
+        raise HTTPException(status_code=500, detail=f"Failed to create frame preview: {message}")
+
+    return result.stdout
+
+
 def extract_audio_for_transcription(video_path: Path, video_id: str) -> Path:
     ffmpeg_path = shutil.which("ffmpeg")
     if not ffmpeg_path:
@@ -904,6 +939,27 @@ def stream_video(video_id: str, path: str) -> FileResponse:
         raise HTTPException(status_code=404, detail="Video not found")
 
     return FileResponse(requested_path)
+
+
+@app.get("/api/frame-preview")
+def frame_preview(video_path: str, time: float) -> Response:
+    requested_path = resolve_dataset_path(video_path)
+
+    try:
+        requested_path.relative_to(RAW_VIDEO_DIR.resolve())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid video path") from exc
+
+    if requested_path.suffix.lower() not in VIDEO_EXTENSIONS:
+        raise HTTPException(status_code=400, detail="Invalid video file type")
+    if not requested_path.exists():
+        raise HTTPException(status_code=404, detail="Video not found")
+
+    return Response(
+        content=read_frame_preview(requested_path, time),
+        media_type="image/jpeg",
+        headers={"Cache-Control": "private, max-age=3600"},
+    )
 
 
 @app.post("/api/srt", response_model=SrtUploadResponse)
