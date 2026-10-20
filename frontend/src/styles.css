@@ -66,6 +66,17 @@ textarea {
   padding: 12px 14px;
 }
 
+.saved-project-card {
+  display: flex;
+  align-items: end;
+  gap: 12px;
+  margin-bottom: 12px;
+  border: 1px solid #d8e0e4;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 12px 14px;
+}
+
 .dataset-dir-field {
   display: grid;
   flex: 1 1 auto;
@@ -80,6 +91,27 @@ textarea {
 }
 
 .dataset-dir-field input {
+  width: 100%;
+  border: 1px solid #c9d4da;
+  border-radius: 6px;
+  background: #fbfcfd;
+  padding: 9px;
+}
+
+.saved-project-field {
+  display: grid;
+  flex: 1 1 auto;
+  gap: 6px;
+  min-width: 0;
+}
+
+.saved-project-field span {
+  font-size: 13px;
+  font-weight: 700;
+  color: #40515c;
+}
+
+.saved-project-field select {
   width: 100%;
   border: 1px solid #c9d4da;
   border-radius: 6px;
@@ -781,6 +813,10 @@ textarea {
 
 @media (max-width: 560px) {
   .dataset-settings-card {
+    display: grid;
+  }
+
+  .saved-project-card {
     display: grid;
   }
 

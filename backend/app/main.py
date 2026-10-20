@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import filecmp
 import os
 import re
 import shutil
@@ -64,6 +65,7 @@ def configure_dataset_paths(dataset_dir: Path) -> None:
     global EXPORT_DIR
     global VIDEOS_JSONL
     global MASTER_JSONL
+    global PROJECTS_JSONL
 
     DATASET_DIR = dataset_dir.resolve()
     RAW_VIDEO_DIR = DATASET_DIR / "raw" / "videos"
@@ -74,6 +76,7 @@ def configure_dataset_paths(dataset_dir: Path) -> None:
     EXPORT_DIR = DATASET_DIR / "exports"
     VIDEOS_JSONL = ANNOTATION_DIR / "videos.jsonl"
     MASTER_JSONL = ANNOTATION_DIR / "master.jsonl"
+    PROJECTS_JSONL = ANNOTATION_DIR / "projects.jsonl"
 
 
 configure_dataset_paths(DATASET_DIR)
@@ -97,6 +100,7 @@ class SubtitleItem(BaseModel):
     start_time: float
     end_time: float
     text: str
+    representative_time: float | None = None
 
 
 class SrtUploadResponse(BaseModel):
@@ -109,11 +113,33 @@ class SrtUploadResponse(BaseModel):
 class SrtSaveRequest(BaseModel):
     path: str
     subtitles: list[SubtitleItem]
+    video_id: str | None = None
+    video_path: str | None = None
 
 
 class SrtSaveResponse(BaseModel):
     path: str
     count: int
+    representative_frames_path: str
+    project_id: str | None = None
+
+
+class SavedProjectSummary(BaseModel):
+    project_id: str
+    video_id: str
+    video_filename: str
+    srt_filename: str
+    updated_at: str
+
+
+class SavedProjectsResponse(BaseModel):
+    projects: list[SavedProjectSummary]
+
+
+class SavedProjectLoadResponse(BaseModel):
+    project_id: str
+    video: VideoUploadResponse
+    srt: SrtUploadResponse
 
 
 class TranscribeRequest(BaseModel):
@@ -248,10 +274,15 @@ def save_upload(file: UploadFile, directory: Path, allowed_extensions: set[str])
         allowed = ", ".join(sorted(allowed_extensions))
         raise HTTPException(status_code=400, detail=f"Unsupported file type. Allowed: {allowed}")
 
+    existing_path = directory / filename
     destination = unique_path(directory, filename)
 
     with destination.open("wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
+
+    if existing_path.exists() and existing_path != destination and filecmp.cmp(existing_path, destination, shallow=False):
+        destination.unlink()
+        return existing_path
 
     return destination
 
@@ -284,10 +315,25 @@ def save_srt_upload(file: UploadFile) -> Path:
         allowed = ", ".join(sorted(SRT_EXTENSIONS))
         raise HTTPException(status_code=400, detail=f"Unsupported file type. Allowed: {allowed}")
 
+    existing_path = ANNOTATION_DIR / filename
+    if existing_path.exists() and representative_frames_path(existing_path).exists():
+        return existing_path
+
     destination = unique_path(ANNOTATION_DIR, filename)
 
     with destination.open("wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
+
+    uploaded_bytes = destination.read_bytes()
+    for existing_path in ANNOTATION_DIR.glob("*.srt"):
+        if existing_path == destination:
+            continue
+        try:
+            if existing_path.read_bytes() == uploaded_bytes:
+                destination.unlink()
+                return existing_path
+        except OSError:
+            continue
 
     return destination
 
@@ -386,6 +432,78 @@ def build_srt(subtitles: list[SubtitleItem]) -> str:
     return "\n\n".join(blocks) + "\n"
 
 
+def representative_frames_path(srt_path: Path) -> Path:
+    return srt_path.with_name(f"{srt_path.stem}.representative_frames.json")
+
+
+def load_representative_frames(srt_path: Path, subtitles: list[SubtitleItem]) -> list[SubtitleItem]:
+    metadata_path = representative_frames_path(srt_path)
+    if not metadata_path.exists():
+        return subtitles
+
+    try:
+        payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return subtitles
+
+    entries = payload.get("representative_frames", [])
+    if not isinstance(entries, list):
+        return subtitles
+
+    entries_by_index = {
+        entry.get("index"): entry
+        for entry in entries
+        if isinstance(entry, dict) and isinstance(entry.get("index"), int)
+    }
+
+    for index, subtitle in enumerate(subtitles, start=1):
+        entry = entries_by_index.get(index)
+        if not entry:
+            continue
+        try:
+            frame_time = float(entry["representative_time"])
+            saved_start = float(entry["start_time"])
+            saved_end = float(entry["end_time"])
+        except (KeyError, TypeError, ValueError):
+            continue
+
+        if (
+            abs(saved_start - subtitle.start_time) > 0.001
+            or abs(saved_end - subtitle.end_time) > 0.001
+            or entry.get("text") != subtitle.text
+            or not subtitle.start_time <= frame_time <= subtitle.end_time
+        ):
+            continue
+        subtitle.representative_time = round(frame_time, 3)
+
+    return subtitles
+
+
+def write_representative_frames(srt_path: Path, subtitles: list[SubtitleItem]) -> Path:
+    entries = []
+    for index, subtitle in enumerate(subtitles, start=1):
+        if subtitle.representative_time is None:
+            continue
+        entries.append(
+            {
+                "index": index,
+                "start_time": round(subtitle.start_time, 3),
+                "end_time": round(subtitle.end_time, 3),
+                "text": subtitle.text,
+                "representative_time": round(subtitle.representative_time, 3),
+            }
+        )
+
+    metadata_path = representative_frames_path(srt_path)
+    payload = {
+        "version": 1,
+        "srt_filename": srt_path.name,
+        "representative_frames": entries,
+    }
+    metadata_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return metadata_path
+
+
 def resolve_annotation_path(relative_path: str) -> Path:
     requested_path = resolve_dataset_path(relative_path)
     try:
@@ -428,6 +546,53 @@ def write_jsonl(path: Path, records: list[dict]) -> None:
     with path.open("w", encoding="utf-8") as handle:
         for record in records:
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def registered_video(stored_path: Path) -> dict | None:
+    relative_path = relative_to_root(stored_path)
+    for record in reversed(read_jsonl(VIDEOS_JSONL)):
+        if record.get("stored_path") == relative_path:
+            return record
+    return None
+
+
+def project_id_for(video_id: str, srt_path: Path) -> str:
+    return f"project_{safe_identifier(video_id)}__{safe_identifier(srt_path.stem)}"
+
+
+def save_project(video_id: str, video_path: Path, srt_path: Path) -> dict:
+    project_id = project_id_for(video_id, srt_path)
+    record = {
+        "project_id": project_id,
+        "video_id": video_id,
+        "video_path": relative_to_root(video_path),
+        "video_filename": video_path.name,
+        "srt_path": relative_to_root(srt_path),
+        "srt_filename": srt_path.name,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    existing_records = read_jsonl(PROJECTS_JSONL)
+    updated_records = [item for item in existing_records if item.get("project_id") != project_id]
+    updated_records.append(record)
+    write_jsonl(PROJECTS_JSONL, updated_records)
+    return record
+
+
+def saved_projects() -> list[dict]:
+    projects: list[dict] = []
+    for record in read_jsonl(PROJECTS_JSONL):
+        try:
+            video_path = resolve_dataset_path(str(record["video_path"]))
+            srt_path = resolve_annotation_path(str(record["srt_path"]))
+            video_path.relative_to(RAW_VIDEO_DIR.resolve())
+        except (KeyError, HTTPException, ValueError):
+            continue
+
+        if not video_path.exists() or not srt_path.exists():
+            continue
+        projects.append(record)
+
+    return sorted(projects, key=lambda record: str(record.get("updated_at", "")), reverse=True)
 
 
 def resolve_dataset_path(relative_path: str) -> Path:
@@ -931,20 +1096,66 @@ def update_dataset_settings(request: DatasetSettingsRequest) -> DatasetSettingsR
     return DatasetSettingsResponse(dataset_dir=str(DATASET_DIR))
 
 
+@app.get("/api/projects", response_model=SavedProjectsResponse)
+def list_saved_projects() -> SavedProjectsResponse:
+    projects = [
+        SavedProjectSummary(
+            project_id=str(record["project_id"]),
+            video_id=str(record["video_id"]),
+            video_filename=str(record["video_filename"]),
+            srt_filename=str(record["srt_filename"]),
+            updated_at=str(record["updated_at"]),
+        )
+        for record in saved_projects()
+    ]
+    return SavedProjectsResponse(projects=projects)
+
+
+@app.get("/api/projects/{project_id}", response_model=SavedProjectLoadResponse)
+def load_saved_project(project_id: str) -> SavedProjectLoadResponse:
+    record = next((item for item in saved_projects() if item.get("project_id") == project_id), None)
+    if record is None:
+        raise HTTPException(status_code=404, detail="保存済みの作業が見つかりません。")
+
+    video_path = resolve_dataset_path(str(record["video_path"]))
+    srt_path = resolve_annotation_path(str(record["srt_path"]))
+    subtitles = load_representative_frames(srt_path, parse_srt(decode_srt_bytes(srt_path.read_bytes())))
+    video_id = str(record["video_id"])
+
+    return SavedProjectLoadResponse(
+        project_id=project_id,
+        video=VideoUploadResponse(
+            video_id=video_id,
+            filename=video_path.name,
+            stored_path=relative_to_root(video_path),
+            stream_url=f"/api/videos/{video_id}/stream?path={relative_to_root(video_path)}",
+        ),
+        srt=SrtUploadResponse(
+            subtitle_id=f"srt_{srt_path.stem}",
+            filename=srt_path.name,
+            stored_path=relative_to_root(srt_path),
+            subtitles=subtitles,
+        ),
+    )
+
+
 @app.post("/api/videos", response_model=VideoUploadResponse)
 def upload_video(file: Annotated[UploadFile, File(...)]) -> VideoUploadResponse:
     ensure_dataset_dirs()
     stored_path = save_upload(file, RAW_VIDEO_DIR, VIDEO_EXTENSIONS)
-    video_id = unique_video_id(file.filename or stored_path.name)
-
-    video_record = {
-        "video_id": video_id,
-        "filename": file.filename,
-        "stored_path": relative_to_root(stored_path),
-        "created_at": datetime.now(timezone.utc).isoformat(),
-    }
-    with VIDEOS_JSONL.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(video_record, ensure_ascii=False) + "\n")
+    video_record = registered_video(stored_path)
+    if video_record is None:
+        video_id = unique_video_id(file.filename or stored_path.name)
+        video_record = {
+            "video_id": video_id,
+            "filename": file.filename,
+            "stored_path": relative_to_root(stored_path),
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        with VIDEOS_JSONL.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(video_record, ensure_ascii=False) + "\n")
+    else:
+        video_id = str(video_record["video_id"])
 
     return VideoUploadResponse(
         video_id=video_id,
@@ -996,7 +1207,7 @@ async def upload_srt(file: Annotated[UploadFile, File(...)]) -> SrtUploadRespons
     stored_path = save_srt_upload(file)
     raw = stored_path.read_bytes()
     content = decode_srt_bytes(raw)
-    subtitles = parse_srt(content)
+    subtitles = load_representative_frames(stored_path, parse_srt(content))
 
     return SrtUploadResponse(
         subtitle_id=f"srt_{Path(stored_path).stem}",
@@ -1018,13 +1229,30 @@ def save_srt(request: SrtSaveRequest) -> SrtSaveResponse:
     for subtitle in request.subtitles:
         if subtitle.end_time <= subtitle.start_time:
             raise HTTPException(status_code=400, detail="Each subtitle end_time must be greater than start_time")
+        if subtitle.representative_time is not None and not (
+            subtitle.start_time <= subtitle.representative_time <= subtitle.end_time
+        ):
+            raise HTTPException(status_code=400, detail="Representative frame time must be within the subtitle range")
 
     stored_path = resolve_annotation_path(request.path)
     stored_path.write_text(build_srt(request.subtitles), encoding="utf-8")
+    metadata_path = write_representative_frames(stored_path, request.subtitles)
+    project_id = None
+    if request.video_id and request.video_path:
+        video_path = resolve_dataset_path(request.video_path)
+        try:
+            video_path.relative_to(RAW_VIDEO_DIR.resolve())
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="Invalid video path") from exc
+        if not video_path.exists():
+            raise HTTPException(status_code=404, detail="Video not found")
+        project_id = save_project(request.video_id, video_path, stored_path)["project_id"]
 
     return SrtSaveResponse(
         path=relative_to_root(stored_path),
         count=len(request.subtitles),
+        representative_frames_path=relative_to_root(metadata_path),
+        project_id=project_id,
     )
 
 

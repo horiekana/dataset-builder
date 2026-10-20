@@ -89,14 +89,18 @@ API:
 
 - `POST /api/videos`: 動画ファイルを `dataset/raw/videos/` に保存します。
 - `GET /api/videos/{video_id}/stream`: 保存済み動画をブラウザ再生用に返します。
-- `POST /api/srt`: SRTファイルを `dataset/annotations/` に保存し、字幕配列を返します。同名ファイルがある場合は `_001` のような連番を付けます。
+- `POST /api/srt`: SRTファイルを `dataset/annotations/` に保存し、字幕配列を返します。同名ファイルがある場合は `_001` のような連番を付けます。代表フレーム情報を持つ同名の編集済みSRTがある場合は、その保存版を再利用します。
 - `POST /api/srt/parse`: SRTファイルを保存せずにパース結果だけ返します。
-- `POST /api/srt/save`: 画面で編集・追加・削除した字幕本文と区間を、読み込み済みSRTファイルへ上書き保存します。字幕をすべて削除した場合は空のSRTとして保存します。
+- `POST /api/srt/save`: 画面で編集・追加・削除した字幕本文と区間を、読み込み済みSRTファイルへ上書き保存します。代表フレーム時刻は同じフォルダの `{SRT名}.representative_frames.json` に保存します。字幕をすべて削除した場合は空のSRTとして保存します。
+- `GET /api/projects`: `Command+S` で保存した動画・SRTの組を一覧で返します。
+- `GET /api/projects/{project_id}`: 保存済みの動画、SRT、代表フレーム時刻をまとめて読み込みます。
 - `POST /api/transcribe`: 動画から音声を抽出し、faster-whisperで字幕下書きを作成します。結果は `dataset/annotations/` にSRTとして保存され、画面の字幕一覧に読み込まれます。
 - `POST /api/master/utterances`: 編集済み字幕を内部master形式に正規化し、`dataset/annotations/master.jsonl` を更新します。代表フレーム画像は `dataset/processed/frames/{video_id}/`、動画クリップは `dataset/processed/clips/{video_id}/` に書き出します。選択された形式は `dataset/exports/export_.../` にまとめて出力します。
 
 `videos.jsonl` は読み込んだ動画の登録台帳です。現時点の `master.jsonl` 書き出しだけなら必須ではありませんが、複数動画の `video_id`、元ファイル名、保存先パスを後から確認できるように残しています。
 `video_id` は元動画ファイル名ベースで作成します。たとえば `テスト用2.mp4` は `video_テスト用2` になり、同じIDが既にある場合は `video_テスト用2_001` のように連番を付けます。
+
+動画とSRTを読み込んだ状態で `Command+S` を押すと、`annotations/projects.jsonl` に作業の組が保存されます。次回以降は画面上部の「保存済みの作業」から選ぶと、動画、SRT、代表フレーム時刻を複製せずに再開できます。
 
 SRTの返却形式:
 

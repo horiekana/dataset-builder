@@ -141,6 +141,9 @@ export default function App() {
   const [datasetDirInput, setDatasetDirInput] = useState("");
   const [isSavingDatasetDir, setIsSavingDatasetDir] = useState(false);
   const [isChoosingDatasetDir, setIsChoosingDatasetDir] = useState(false);
+  const [savedProjects, setSavedProjects] = useState([]);
+  const [selectedProjectId, setSelectedProjectId] = useState("");
+  const [isLoadingProject, setIsLoadingProject] = useState(false);
   const [statusMessage, setStatusMessage] = useState("");
   const [copyMessage, setCopyMessage] = useState("");
   const [error, setError] = useState("");
@@ -152,6 +155,8 @@ export default function App() {
 
   const activityMessage = isExportingClips
     ? "選択された形式のデータセットを書き出しています..."
+    : isLoadingProject
+    ? "保存済みの作業を読み込んでいます..."
     : isChoosingDatasetDir
     ? "フォルダを選択しています..."
     : isSavingDatasetDir
@@ -171,9 +176,14 @@ export default function App() {
         ...subtitle,
         start_time_input: formatSeconds(subtitle.start_time),
         end_time_input: formatSeconds(subtitle.end_time),
-        representative_time: null,
+        representative_time: subtitle.representative_time ?? null,
       })),
     };
+  }
+
+  async function refreshSavedProjects() {
+    const result = await getJson("/api/projects");
+    setSavedProjects(result.projects);
   }
 
   useEffect(() => {
@@ -193,14 +203,19 @@ export default function App() {
     }
 
     loadDatasetSettings();
+    refreshSavedProjects().catch((settingsError) => {
+      if (!ignore) {
+        setError(settingsError.message);
+      }
+    });
 
     return () => {
       ignore = true;
     };
   }, []);
 
-  async function saveDatasetDir() {
-    if (!datasetDirInput.trim()) {
+  async function applyDatasetDir(nextDatasetDir) {
+    if (!nextDatasetDir.trim()) {
       setError("データ保存先を入力してください。");
       return;
     }
@@ -210,21 +225,28 @@ export default function App() {
     setIsSavingDatasetDir(true);
     try {
       const result = await postJson("/api/settings/dataset", {
-        dataset_dir: datasetDirInput,
+        dataset_dir: nextDatasetDir,
       });
       setDatasetDir(result.dataset_dir);
       setDatasetDirInput(result.dataset_dir);
       setVideo(null);
       setSrt(null);
       setActiveSubtitleIndex(null);
+      setSavedProjects([]);
+      setSelectedProjectId("");
       stopAtTimeRef.current = null;
       setCurrentVideoTime(0);
+      await refreshSavedProjects();
       setStatusMessage("データ保存先を変更しました。動画とSRTを読み込み直してください。");
     } catch (settingsError) {
       setError(settingsError.message);
     } finally {
       setIsSavingDatasetDir(false);
     }
+  }
+
+  async function saveDatasetDir() {
+    await applyDatasetDir(datasetDirInput);
   }
 
   async function chooseDatasetDir() {
@@ -235,11 +257,35 @@ export default function App() {
       const result = await getJson("/api/settings/dataset/select");
       if (result.dataset_dir) {
         setDatasetDirInput(result.dataset_dir);
+        await applyDatasetDir(result.dataset_dir);
       }
     } catch (settingsError) {
       setError(settingsError.message);
     } finally {
       setIsChoosingDatasetDir(false);
+    }
+  }
+
+  async function openSavedProject() {
+    if (!selectedProjectId) {
+      return;
+    }
+
+    setError("");
+    setStatusMessage("");
+    setIsLoadingProject(true);
+    try {
+      const result = await getJson(`/api/projects/${encodeURIComponent(selectedProjectId)}`);
+      setVideo(result.video);
+      setSrt(normalizeLoadedSubtitles(result.srt));
+      setActiveSubtitleIndex(null);
+      stopAtTimeRef.current = null;
+      setCurrentVideoTime(0);
+      setStatusMessage(`${result.video.filename} と ${result.srt.filename} を読み込みました。`);
+    } catch (projectError) {
+      setError(projectError.message);
+    } finally {
+      setIsLoadingProject(false);
     }
   }
 
@@ -569,9 +615,16 @@ export default function App() {
           start_time: subtitle.start_time,
           end_time: subtitle.end_time,
           text: subtitle.text,
+          representative_time: subtitle.representative_time,
         })),
+        video_id: video?.video_id ?? null,
+        video_path: video?.stored_path ?? null,
       });
-      setStatusMessage(`${result.path} を ${result.count} 件の字幕で上書き保存しました。`);
+      if (result.project_id) {
+        setSelectedProjectId(result.project_id);
+        await refreshSavedProjects();
+      }
+      setStatusMessage(`${result.path} と代表フレーム情報を ${result.count} 件の字幕で保存しました。`);
     } catch (saveError) {
       setError(saveError.message);
     } finally {
@@ -709,6 +762,32 @@ export default function App() {
         </button>
       </section>
 
+      <section className="saved-project-card" aria-label="保存済みの作業">
+        <label className="saved-project-field">
+          <span>保存済みの作業</span>
+          <select
+            disabled={isLoadingProject || !savedProjects.length}
+            onChange={(event) => setSelectedProjectId(event.target.value)}
+            value={selectedProjectId}
+          >
+            <option value="">{savedProjects.length ? "保存済みの作業を選択" : "保存済みの作業はありません"}</option>
+            {savedProjects.map((project) => (
+              <option key={project.project_id} value={project.project_id}>
+                {project.video_filename} / {project.srt_filename}
+              </option>
+            ))}
+          </select>
+        </label>
+        <button
+          className="export-button secondary"
+          disabled={!selectedProjectId || isLoadingProject}
+          onClick={openSavedProject}
+          type="button"
+        >
+          {isLoadingProject ? "読み込み中..." : "開く"}
+        </button>
+      </section>
+
       <section className="toolbar" aria-label="ファイル読み込みと書き出し">
         <div className="toolbar-card import-card" aria-label="インポート">
           <label className="file-field">
@@ -781,6 +860,7 @@ export default function App() {
 
       {(isUploadingVideo ||
         isUploadingSrt ||
+        isLoadingProject ||
         isChoosingDatasetDir ||
         isSavingDatasetDir ||
         isTranscribing ||
