@@ -28,6 +28,19 @@ function secondsInputIsValid(value) {
   return Number.isFinite(parsed) && parsed >= 0;
 }
 
+function keepRepresentativeFrameInRange(subtitle) {
+  if (
+    subtitle.representative_time === null ||
+    subtitle.representative_time === undefined ||
+    subtitle.end_time <= subtitle.start_time ||
+    (subtitle.start_time <= subtitle.representative_time && subtitle.representative_time <= subtitle.end_time)
+  ) {
+    return subtitle;
+  }
+
+  return { ...subtitle, representative_time: subtitle.end_time };
+}
+
 function representativeFramePreviewUrl(video, subtitle) {
   if (!video?.stored_path || subtitle.representative_time === null || subtitle.representative_time === undefined) {
     return "";
@@ -418,7 +431,7 @@ export default function App() {
         if (!secondsInputIsValid(value)) {
           return { ...subtitle, [inputField]: value };
         }
-        return { ...subtitle, [field]: seconds, [inputField]: value };
+        return keepRepresentativeFrameInRange({ ...subtitle, [field]: seconds, [inputField]: value });
       });
 
       return { ...currentSrt, subtitles };
@@ -434,7 +447,7 @@ export default function App() {
         if (subtitleIndex !== idx) return subtitle;
         const rawValue = subtitle[inputField] ?? String(subtitle[field]);
         const seconds = parseSeconds(rawValue);
-        return { ...subtitle, [field]: seconds, [inputField]: formatSeconds(seconds) };
+        return keepRepresentativeFrameInRange({ ...subtitle, [field]: seconds, [inputField]: formatSeconds(seconds) });
       });
 
       return { ...currentSrt, subtitles };
@@ -943,6 +956,7 @@ export default function App() {
                   className={`subtitle-row ${activeSubtitleIndex === idx ? "active" : ""}`}
                 >
                   <div className="subtitle-controls">
+                    <div className="subtitle-number">No. {idx + 1}</div>
                     <button
                       className="subtitle-jump"
                       onClick={() => jumpToSubtitle(subtitle, idx)}

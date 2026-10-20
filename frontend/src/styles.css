@@ -556,6 +556,13 @@ textarea {
   align-self: start;
 }
 
+.subtitle-number {
+  color: #2f6175;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+  font-weight: 800;
+}
+
 .subtitle-main {
   display: grid;
   gap: 10px;
