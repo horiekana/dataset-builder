@@ -140,6 +140,7 @@ export default function App() {
   const [datasetDir, setDatasetDir] = useState("");
   const [datasetDirInput, setDatasetDirInput] = useState("");
   const [isSavingDatasetDir, setIsSavingDatasetDir] = useState(false);
+  const [isChoosingDatasetDir, setIsChoosingDatasetDir] = useState(false);
   const [statusMessage, setStatusMessage] = useState("");
   const [copyMessage, setCopyMessage] = useState("");
   const [error, setError] = useState("");
@@ -151,6 +152,8 @@ export default function App() {
 
   const activityMessage = isExportingClips
     ? "選択された形式のデータセットを書き出しています..."
+    : isChoosingDatasetDir
+    ? "フォルダを選択しています..."
     : isSavingDatasetDir
     ? "データ保存先を変更しています..."
     : isTranscribing
@@ -221,6 +224,22 @@ export default function App() {
       setError(settingsError.message);
     } finally {
       setIsSavingDatasetDir(false);
+    }
+  }
+
+  async function chooseDatasetDir() {
+    setError("");
+    setStatusMessage("");
+    setIsChoosingDatasetDir(true);
+    try {
+      const result = await getJson("/api/settings/dataset/select");
+      if (result.dataset_dir) {
+        setDatasetDirInput(result.dataset_dir);
+      }
+    } catch (settingsError) {
+      setError(settingsError.message);
+    } finally {
+      setIsChoosingDatasetDir(false);
     }
   }
 
@@ -674,11 +693,19 @@ export default function App() {
         </label>
         <button
           className="export-button secondary"
-          disabled={isSavingDatasetDir || !datasetDirInput.trim() || datasetDirInput === datasetDir}
+          disabled={isSavingDatasetDir || isChoosingDatasetDir || !datasetDirInput.trim() || datasetDirInput === datasetDir}
           onClick={saveDatasetDir}
           type="button"
         >
           {isSavingDatasetDir ? "適用中..." : "適用"}
+        </button>
+        <button
+          className="export-button secondary"
+          disabled={isSavingDatasetDir || isChoosingDatasetDir}
+          onClick={chooseDatasetDir}
+          type="button"
+        >
+          {isChoosingDatasetDir ? "選択中..." : "フォルダを選択"}
         </button>
       </section>
 
@@ -754,6 +781,7 @@ export default function App() {
 
       {(isUploadingVideo ||
         isUploadingSrt ||
+        isChoosingDatasetDir ||
         isSavingDatasetDir ||
         isTranscribing ||
         isSavingSrt ||

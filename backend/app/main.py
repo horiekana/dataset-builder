@@ -160,6 +160,10 @@ class DatasetSettingsRequest(BaseModel):
     dataset_dir: str
 
 
+class DatasetDirectoryPickerResponse(BaseModel):
+    dataset_dir: str | None = None
+
+
 def write_env_value(path: Path, key: str, value: str) -> None:
     lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
     next_lines: list[str] = []
@@ -886,6 +890,30 @@ def health() -> dict[str, str]:
 @app.get("/api/settings/dataset", response_model=DatasetSettingsResponse)
 def get_dataset_settings() -> DatasetSettingsResponse:
     return DatasetSettingsResponse(dataset_dir=str(DATASET_DIR))
+
+
+@app.get("/api/settings/dataset/select", response_model=DatasetDirectoryPickerResponse)
+def select_dataset_directory() -> DatasetDirectoryPickerResponse:
+    osascript_path = shutil.which("osascript")
+    if not osascript_path:
+        raise HTTPException(status_code=501, detail="フォルダ選択はmacOSでのみ利用できます。")
+
+    result = subprocess.run(
+        [
+            osascript_path,
+            "-e",
+            'POSIX path of (choose folder with prompt "データ保存先フォルダを選択してください")',
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        if "User canceled" in result.stderr or "-128" in result.stderr:
+            return DatasetDirectoryPickerResponse()
+        raise HTTPException(status_code=500, detail="フォルダ選択を開けませんでした。")
+
+    selected_path = result.stdout.strip()
+    return DatasetDirectoryPickerResponse(dataset_dir=selected_path or None)
 
 
 @app.post("/api/settings/dataset", response_model=DatasetSettingsResponse)

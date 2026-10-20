@@ -57,6 +57,7 @@ textarea {
 .dataset-settings-card {
   display: flex;
   align-items: end;
+  flex-wrap: wrap;
   gap: 12px;
   margin-bottom: 12px;
   border: 1px solid #d8e0e4;
