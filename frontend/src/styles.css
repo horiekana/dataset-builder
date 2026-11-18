@@ -345,6 +345,13 @@ textarea {
   min-width: 0;
 }
 
+.pane-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+}
+
 .pane-header h2 {
   margin: 0;
   font-size: 16px;
@@ -467,6 +474,49 @@ textarea {
   background: #e5f3f7;
 }
 
+.subtitle-row.selected {
+  box-shadow: inset 3px 0 0 #247e9f;
+}
+
+.subtitle-row.excluded {
+  background: #f6f4ef;
+}
+
+.subtitle-row.excluded .subtitle-editor {
+  color: #7a7f84;
+}
+
+.exclude-control {
+  display: grid;
+  gap: 5px;
+  border: 1px solid #e3d9c6;
+  border-radius: 6px;
+  background: #fbf8f1;
+  padding: 8px;
+  font-size: 12px;
+  font-weight: 700;
+  color: #6b5a3a;
+}
+
+.exclude-control label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+
+.exclude-control .exclude-reason {
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid #d8ccb4;
+  border-radius: 6px;
+  padding: 5px 6px;
+  font-size: 12px;
+  font-weight: 400;
+  background: #ffffff;
+  color: #40515c;
+}
+
 .subtitle-insert-divider {
   display: grid;
   place-items: center;
@@ -556,11 +606,25 @@ textarea {
   align-self: start;
 }
 
-.subtitle-number {
+.subtitle-selection {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
   color: #2f6175;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 13px;
   font-weight: 800;
+}
+
+.subtitle-selection input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: #247e9f;
+}
+
+.subtitle-selection input:disabled {
+  cursor: not-allowed;
 }
 
 .subtitle-main {
@@ -770,8 +834,10 @@ textarea {
 .representative-preview img {
   display: block;
   width: 100%;
-  height: 132px;
-  object-fit: cover;
+  height: auto;
+  aspect-ratio: 16 / 9;
+  object-fit: contain;
+  background: #101820;
 }
 
 .representative-preview-empty {
@@ -829,6 +895,11 @@ textarea {
 
   .subtitle-row {
     grid-template-columns: 1fr;
+  }
+
+  .pane-actions {
+    align-items: stretch;
+    flex-direction: column;
   }
 
   .file-field,

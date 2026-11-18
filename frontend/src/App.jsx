@@ -53,6 +53,26 @@ function representativeFramePreviewUrl(video, subtitle) {
   return `${API_BASE}/api/frame-preview?${params.toString()}`;
 }
 
+const EXCLUDE_REASON_OPTIONS = [
+  "経路説明",
+  "訓練特有の発話",
+  "対話・雑談",
+  "映像に対象なし",
+  "聞き取り不明瞭",
+  "その他",
+];
+
+// 以前の候補名で保存された理由を新しい候補名にそろえる
+const LEGACY_EXCLUDE_REASONS = {
+  "経路説明（映像に根拠なし）": "経路説明",
+  "映像に対象が写っていない": "映像に対象なし",
+};
+
+function normalizeExcludeReason(reason) {
+  const value = (reason || "").trim();
+  return LEGACY_EXCLUDE_REASONS[value] ?? value;
+}
+
 function createSubtitle(startTime = 0, endTime = startTime + 2) {
   return {
     index: null,
@@ -62,6 +82,8 @@ function createSubtitle(startTime = 0, endTime = startTime + 2) {
     end_time_input: formatSeconds(endTime),
     text: "",
     representative_time: null,
+    exclude_from_training: false,
+    exclude_reason: "",
   };
 }
 
@@ -87,6 +109,13 @@ function getInsertSubtitleTimes(subtitles, insertIndex) {
   }
 
   return { startTime, endTime };
+}
+
+function mergeSubtitleText(subtitles) {
+  return subtitles
+    .map((subtitle) => subtitle.text.trim())
+    .filter(Boolean)
+    .join("");
 }
 
 async function uploadFile(endpoint, file) {
@@ -138,9 +167,11 @@ export default function App() {
   const videoRef = useRef(null);
   const copyToastTimerRef = useRef(null);
   const stopAtTimeRef = useRef(null);
+  const lastPersistedProgressRef = useRef({ projectId: null, index: null });
   const [video, setVideo] = useState(null);
   const [srt, setSrt] = useState(null);
   const [activeSubtitleIndex, setActiveSubtitleIndex] = useState(null);
+  const [selectedSubtitleIndices, setSelectedSubtitleIndices] = useState([]);
   const [currentVideoTime, setCurrentVideoTime] = useState(0);
   const [isUploadingVideo, setIsUploadingVideo] = useState(false);
   const [isUploadingSrt, setIsUploadingSrt] = useState(false);
@@ -156,6 +187,7 @@ export default function App() {
   const [isChoosingDatasetDir, setIsChoosingDatasetDir] = useState(false);
   const [savedProjects, setSavedProjects] = useState([]);
   const [selectedProjectId, setSelectedProjectId] = useState("");
+  const [currentProjectId, setCurrentProjectId] = useState(null);
   const [isLoadingProject, setIsLoadingProject] = useState(false);
   const [statusMessage, setStatusMessage] = useState("");
   const [copyMessage, setCopyMessage] = useState("");
@@ -190,6 +222,8 @@ export default function App() {
         start_time_input: formatSeconds(subtitle.start_time),
         end_time_input: formatSeconds(subtitle.end_time),
         representative_time: subtitle.representative_time ?? null,
+        exclude_from_training: subtitle.exclude_from_training ?? false,
+        exclude_reason: normalizeExcludeReason(subtitle.exclude_reason),
       })),
     };
   }
@@ -245,8 +279,11 @@ export default function App() {
       setVideo(null);
       setSrt(null);
       setActiveSubtitleIndex(null);
+      setSelectedSubtitleIndices([]);
       setSavedProjects([]);
       setSelectedProjectId("");
+      setCurrentProjectId(null);
+      lastPersistedProgressRef.current = { projectId: null, index: null };
       stopAtTimeRef.current = null;
       setCurrentVideoTime(0);
       await refreshSavedProjects();
@@ -291,10 +328,24 @@ export default function App() {
       const result = await getJson(`/api/projects/${encodeURIComponent(selectedProjectId)}`);
       setVideo(result.video);
       setSrt(normalizeLoadedSubtitles(result.srt));
-      setActiveSubtitleIndex(null);
+      setSelectedSubtitleIndices([]);
+      const resumeIndex = result.last_worked_subtitle_index;
+      const canResume = Number.isInteger(resumeIndex) && resumeIndex >= 1 && resumeIndex <= result.srt.subtitles.length;
+      setActiveSubtitleIndex(canResume ? resumeIndex - 1 : null);
+      setCurrentProjectId(result.project_id);
+      lastPersistedProgressRef.current = { projectId: result.project_id, index: canResume ? resumeIndex : null };
       stopAtTimeRef.current = null;
       setCurrentVideoTime(0);
-      setStatusMessage(`${result.video.filename} と ${result.srt.filename} を読み込みました。`);
+      setStatusMessage(
+        canResume
+          ? `${result.video.filename} と ${result.srt.filename} を読み込みました。前回は No. ${resumeIndex} まで作業していました。`
+          : `${result.video.filename} と ${result.srt.filename} を読み込みました。`,
+      );
+      if (canResume) {
+        window.setTimeout(() => {
+          document.getElementById(`subtitle-row-${resumeIndex}`)?.scrollIntoView({ block: "center", behavior: "smooth" });
+        }, 0);
+      }
     } catch (projectError) {
       setError(projectError.message);
     } finally {
@@ -324,6 +375,9 @@ export default function App() {
       setCurrentVideoTime(0);
       stopAtTimeRef.current = null;
       setActiveSubtitleIndex(null);
+      setSelectedSubtitleIndices([]);
+      setCurrentProjectId(null);
+      lastPersistedProgressRef.current = { projectId: null, index: null };
     } catch (uploadError) {
       setError(uploadError.message);
     } finally {
@@ -342,6 +396,9 @@ export default function App() {
       const result = await uploadFile("/api/srt", file);
       setSrt(normalizeLoadedSubtitles(result));
       setActiveSubtitleIndex(null);
+      setSelectedSubtitleIndices([]);
+      setCurrentProjectId(null);
+      lastPersistedProgressRef.current = { projectId: null, index: null };
     } catch (uploadError) {
       setError(uploadError.message);
     } finally {
@@ -367,6 +424,9 @@ export default function App() {
       });
       setSrt(normalizeLoadedSubtitles(result));
       setActiveSubtitleIndex(null);
+      setSelectedSubtitleIndices([]);
+      setCurrentProjectId(null);
+      lastPersistedProgressRef.current = { projectId: null, index: null };
       setStatusMessage(`${result.filename} を ${result.subtitles.length} 件の字幕下書きとして作成しました。`);
     } catch (transcribeError) {
       setError(transcribeError.message);
@@ -385,8 +445,36 @@ export default function App() {
     stopAtTimeRef.current = subtitle.end_time;
     videoRef.current.play().catch(() => {});
     setCurrentVideoTime(subtitle.start_time);
-    setActiveSubtitleIndex(idx);
+    rememberWorkPosition(idx);
     setError("");
+  }
+
+  function rememberWorkPosition(idx) {
+    setActiveSubtitleIndex(idx);
+
+    if (!currentProjectId) return;
+
+    const subtitleNumber = idx + 1;
+    if (
+      lastPersistedProgressRef.current.projectId === currentProjectId &&
+      lastPersistedProgressRef.current.index === subtitleNumber
+    ) {
+      return;
+    }
+
+    lastPersistedProgressRef.current = { projectId: currentProjectId, index: subtitleNumber };
+    postJson(`/api/projects/${encodeURIComponent(currentProjectId)}/progress`, {
+      last_worked_subtitle_index: subtitleNumber,
+    })
+      .then((project) => {
+        setSavedProjects((projects) =>
+          projects.map((item) => (item.project_id === project.project_id ? project : item)),
+        );
+      })
+      .catch((progressError) => {
+        lastPersistedProgressRef.current = { projectId: null, index: null };
+        setError(progressError.message);
+      });
   }
 
   function handleVideoTimeUpdate(event) {
@@ -413,6 +501,20 @@ export default function App() {
       const subtitles = currentSrt.subtitles.map((subtitle, subtitleIndex) => {
         if (subtitleIndex !== idx) return subtitle;
         return { ...subtitle, text };
+      });
+
+      return { ...currentSrt, subtitles };
+    });
+  }
+
+  function updateSubtitleExclusion(idx, changes) {
+    rememberWorkPosition(idx);
+    setSrt((currentSrt) => {
+      if (!currentSrt) return currentSrt;
+
+      const subtitles = currentSrt.subtitles.map((subtitle, subtitleIndex) => {
+        if (subtitleIndex !== idx) return subtitle;
+        return { ...subtitle, ...changes };
       });
 
       return { ...currentSrt, subtitles };
@@ -460,6 +562,8 @@ export default function App() {
       return;
     }
 
+    rememberWorkPosition(idx);
+
     setSrt((currentSrt) => {
       if (!currentSrt) return currentSrt;
 
@@ -478,7 +582,6 @@ export default function App() {
       });
 
       setError("");
-      setActiveSubtitleIndex(idx);
       return { ...currentSrt, subtitles };
     });
   }
@@ -492,10 +595,11 @@ export default function App() {
     videoRef.current.currentTime = subtitle.representative_time;
     videoRef.current.pause();
     setCurrentVideoTime(subtitle.representative_time);
-    setActiveSubtitleIndex(idx);
+    rememberWorkPosition(idx);
   }
 
   function clearRepresentativeFrame(idx) {
+    rememberWorkPosition(idx);
     setSrt((currentSrt) => {
       if (!currentSrt) return currentSrt;
 
@@ -537,19 +641,86 @@ export default function App() {
     });
   }
 
-  function addSubtitleAtPosition(insertIndex) {
+  function toggleSubtitleSelection(idx) {
+    rememberWorkPosition(idx);
+    setSelectedSubtitleIndices((currentIndices) =>
+      currentIndices.includes(idx)
+        ? currentIndices.filter((currentIndex) => currentIndex !== idx)
+        : [...currentIndices, idx].sort((left, right) => left - right),
+    );
+  }
+
+  function mergeSelectedSubtitles() {
+    if (!srt) return;
+
+    const selectedIndices = [...selectedSubtitleIndices].sort((left, right) => left - right);
+    if (selectedIndices.length < 2) {
+      setError("結合する字幕を2件以上選択してください。");
+      return;
+    }
+
+    const firstIndex = selectedIndices[0];
+    const lastIndex = selectedIndices[selectedIndices.length - 1];
+    if (lastIndex - firstIndex + 1 !== selectedIndices.length) {
+      setError("結合できるのは連続した字幕だけです。");
+      return;
+    }
+
+    const subtitlesToMerge = srt.subtitles.slice(firstIndex, lastIndex + 1);
+    const startTime = subtitlesToMerge[0].start_time;
+    const endTime = subtitlesToMerge[subtitlesToMerge.length - 1].end_time;
+    const midpoint = startTime + (endTime - startTime) / 2;
+    const representativeTime = subtitlesToMerge
+      .map((subtitle) => subtitle.representative_time)
+      .filter((time) => time !== null && time !== undefined && time >= startTime && time <= endTime)
+      .sort((left, right) => Math.abs(left - midpoint) - Math.abs(right - midpoint))[0] ?? null;
+    const mergedSubtitle = {
+      ...subtitlesToMerge[0],
+      start_time: startTime,
+      end_time: endTime,
+      start_time_input: formatSeconds(startTime),
+      end_time_input: formatSeconds(endTime),
+      text: mergeSubtitleText(subtitlesToMerge),
+      representative_time: representativeTime,
+      exclude_from_training: subtitlesToMerge.some((subtitle) => subtitle.exclude_from_training),
+      exclude_reason:
+        subtitlesToMerge.map((subtitle) => (subtitle.exclude_reason || "").trim()).find(Boolean) ?? "",
+    };
+
     setSrt((currentSrt) => {
-      if (!currentSrt) {
-        setError("先にSRTファイルを選択してください。");
-        return currentSrt;
-      }
+      if (!currentSrt) return currentSrt;
+      return {
+        ...currentSrt,
+        subtitles: [
+          ...currentSrt.subtitles.slice(0, firstIndex),
+          mergedSubtitle,
+          ...currentSrt.subtitles.slice(lastIndex + 1),
+        ],
+      };
+    });
+    setSelectedSubtitleIndices([]);
+    rememberWorkPosition(firstIndex);
+    setError("");
+    setStatusMessage(`No. ${firstIndex + 1} から No. ${lastIndex + 1} を1件の字幕に結合しました。Command + S で保存できます。`);
+  }
+
+  function addSubtitleAtPosition(insertIndex) {
+    if (!srt) {
+      setError("先にSRTファイルを選択してください。");
+      return;
+    }
+
+    const boundedInsertIndex = Math.min(Math.max(insertIndex, 0), srt.subtitles.length);
+    rememberWorkPosition(boundedInsertIndex);
+    setSelectedSubtitleIndices([]);
+
+    setSrt((currentSrt) => {
+      if (!currentSrt) return currentSrt;
 
       const subtitles = [...currentSrt.subtitles];
-      const boundedInsertIndex = Math.min(Math.max(insertIndex, 0), subtitles.length);
       const { startTime, endTime } = getInsertSubtitleTimes(subtitles, boundedInsertIndex);
       const nextSubtitle = createSubtitle(startTime, endTime);
       subtitles.splice(boundedInsertIndex, 0, nextSubtitle);
-      setActiveSubtitleIndex(boundedInsertIndex);
 
       setError("");
       return { ...currentSrt, subtitles };
@@ -557,6 +728,7 @@ export default function App() {
   }
 
   function deleteSubtitle(idx) {
+    setSelectedSubtitleIndices([]);
     setSrt((currentSrt) => {
       if (!currentSrt) return currentSrt;
 
@@ -629,12 +801,20 @@ export default function App() {
           end_time: subtitle.end_time,
           text: subtitle.text,
           representative_time: subtitle.representative_time,
+          exclude_from_training: Boolean(subtitle.exclude_from_training),
+          exclude_reason: subtitle.exclude_from_training ? subtitle.exclude_reason || "" : "",
         })),
         video_id: video?.video_id ?? null,
         video_path: video?.stored_path ?? null,
+        last_worked_subtitle_index: activeSubtitleIndex === null ? null : activeSubtitleIndex + 1,
       });
       if (result.project_id) {
         setSelectedProjectId(result.project_id);
+        setCurrentProjectId(result.project_id);
+        lastPersistedProgressRef.current = {
+          projectId: result.project_id,
+          index: result.last_worked_subtitle_index,
+        };
         await refreshSavedProjects();
       }
       setStatusMessage(`${result.path} と代表フレーム情報を ${result.count} 件の字幕で保存しました。`);
@@ -647,6 +827,16 @@ export default function App() {
 
   useEffect(() => {
     function handleKeyDown(event) {
+      const hasCommandModifier = event.metaKey || event.ctrlKey;
+
+      if (hasCommandModifier && event.shiftKey && event.key.toLowerCase() === "m") {
+        event.preventDefault();
+        if (!isSavingSrt && !isExportingMaster && !isExportingClips && !isTranscribing) {
+          mergeSelectedSubtitles();
+        }
+        return;
+      }
+
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "s") {
         event.preventDefault();
         if (!isSavingSrt && !isExportingMaster && !isExportingClips && !isTranscribing) {
@@ -724,10 +914,12 @@ export default function App() {
           end_time: subtitle.end_time,
           text: subtitle.text,
           representative_time: subtitle.representative_time,
+          exclude_from_training: Boolean(subtitle.exclude_from_training),
+          exclude_reason: subtitle.exclude_from_training ? subtitle.exclude_reason || "" : "",
         })),
       });
       setStatusMessage(
-        `${result.export_path} に ${result.count} 件の発話、${result.clip_count} 件のクリップ、${result.frame_count} 件の代表フレームを書き出しました。`,
+        `${result.export_path} に ${result.count} 件の発話（うち学習除外 ${srt.subtitles.filter((subtitle) => subtitle.exclude_from_training).length} 件）、${result.clip_count} 件のクリップ、${result.frame_count} 件の代表フレームを書き出しました。`,
       );
     } catch (exportError) {
       setError(exportError.message);
@@ -787,6 +979,7 @@ export default function App() {
             {savedProjects.map((project) => (
               <option key={project.project_id} value={project.project_id}>
                 {project.video_filename} / {project.srt_filename}
+                {project.last_worked_subtitle_index ? ` (No. ${project.last_worked_subtitle_index} まで)` : ""}
               </option>
             ))}
           </select>
@@ -927,16 +1120,31 @@ export default function App() {
           <div className="pane-header">
             <div>
               <h2>字幕一覧</h2>
-              <span>{srt ? `${srt.subtitles.length} 件` : "未選択"}</span>
+              <span>
+                {srt
+                  ? `${srt.subtitles.length} 件（学習除外 ${srt.subtitles.filter((subtitle) => subtitle.exclude_from_training).length} 件）`
+                  : "未選択"}
+              </span>
             </div>
-            <button
-              className="pane-action-button"
-              disabled={!srt?.subtitles?.length || isTranscribing || isSavingSrt || isExportingMaster || isExportingClips}
-              onClick={autoSetMissingRepresentativeFrames}
-              type="button"
-            >
-              代表フレーム自動設定
-            </button>
+            <div className="pane-actions">
+              <button
+                className="pane-action-button"
+                disabled={selectedSubtitleIndices.length < 2 || isTranscribing || isSavingSrt || isExportingMaster || isExportingClips}
+                onClick={mergeSelectedSubtitles}
+                title="選択した連続字幕を結合 (Command + Shift + M)"
+                type="button"
+              >
+                選択を結合{selectedSubtitleIndices.length ? ` (${selectedSubtitleIndices.length})` : ""}
+              </button>
+              <button
+                className="pane-action-button"
+                disabled={!srt?.subtitles?.length || isTranscribing || isSavingSrt || isExportingMaster || isExportingClips}
+                onClick={autoSetMissingRepresentativeFrames}
+                type="button"
+              >
+                代表フレーム自動設定
+              </button>
+            </div>
           </div>
           {srt?.subtitles?.length ? (
             <div className="subtitle-list">
@@ -953,10 +1161,21 @@ export default function App() {
               {srt.subtitles.map((subtitle, idx) => (
                 <React.Fragment key={idx}>
                 <article
-                  className={`subtitle-row ${activeSubtitleIndex === idx ? "active" : ""}`}
+                  className={`subtitle-row ${activeSubtitleIndex === idx ? "active" : ""} ${selectedSubtitleIndices.includes(idx) ? "selected" : ""} ${subtitle.exclude_from_training ? "excluded" : ""}`}
+                  id={`subtitle-row-${idx + 1}`}
+                  onFocusCapture={() => rememberWorkPosition(idx)}
                 >
                   <div className="subtitle-controls">
-                    <div className="subtitle-number">No. {idx + 1}</div>
+                    <label className="subtitle-selection">
+                      <input
+                        aria-label={`No. ${idx + 1} を結合対象に選択`}
+                        checked={selectedSubtitleIndices.includes(idx)}
+                        disabled={isTranscribing || isSavingSrt || isExportingMaster || isExportingClips}
+                        onChange={() => toggleSubtitleSelection(idx)}
+                        type="checkbox"
+                      />
+                      <span>No. {idx + 1}</span>
+                    </label>
                     <button
                       className="subtitle-jump"
                       onClick={() => jumpToSubtitle(subtitle, idx)}
@@ -1013,6 +1232,34 @@ export default function App() {
                         </>
                       ) : (
                         <em>未設定</em>
+                      )}
+                    </div>
+                    <div className="exclude-control">
+                      <label>
+                        <input
+                          checked={Boolean(subtitle.exclude_from_training)}
+                          onChange={(event) => updateSubtitleExclusion(idx, { exclude_from_training: event.target.checked })}
+                          type="checkbox"
+                        />
+                        <span>学習に使わない</span>
+                      </label>
+                      {subtitle.exclude_from_training && (
+                        <select
+                          aria-label={`No. ${idx + 1} の除外理由`}
+                          className="exclude-reason"
+                          onChange={(event) => updateSubtitleExclusion(idx, { exclude_reason: event.target.value })}
+                          value={subtitle.exclude_reason || ""}
+                        >
+                          <option value="">理由を選択（任意）</option>
+                          {EXCLUDE_REASON_OPTIONS.map((reason) => (
+                            <option key={reason} value={reason}>
+                              {reason}
+                            </option>
+                          ))}
+                          {subtitle.exclude_reason && !EXCLUDE_REASON_OPTIONS.includes(subtitle.exclude_reason) && (
+                            <option value={subtitle.exclude_reason}>{subtitle.exclude_reason}</option>
+                          )}
+                        </select>
                       )}
                     </div>
                     <div className="subtitle-edit-actions">

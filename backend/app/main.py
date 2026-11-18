@@ -87,6 +87,15 @@ APP_VERSION = "0.2.0"
 DEFAULT_INSTRUCTION = "この歩行動画クリップと代表フレームを見て、発話内容を答えてください。"
 SUPPORTED_EXPORT_FORMATS = {"master", "qwen", "llava", "trl"}
 
+# 文字起こし後に機械的に置き換える誤認識の対応表。asr_corrections.txt があればそちらを優先する。
+# （initial_prompt / hotwords に単語リストを渡す方式は、単語リストがそのまま字幕に出る誤動作が起きたため使わない）
+ASR_CORRECTIONS_PATH = ROOT_DIR / "asr_corrections.txt"
+DEFAULT_ASR_CORRECTIONS = [
+    ("テンジブロック", "点字ブロック"),
+    ("天地ブロック", "点字ブロック"),
+    ("ノータリー", "ロータリー"),
+]
+
 
 class VideoUploadResponse(BaseModel):
     video_id: str
@@ -101,6 +110,8 @@ class SubtitleItem(BaseModel):
     end_time: float
     text: str
     representative_time: float | None = None
+    exclude_from_training: bool = False
+    exclude_reason: str = ""
 
 
 class SrtUploadResponse(BaseModel):
@@ -115,6 +126,7 @@ class SrtSaveRequest(BaseModel):
     subtitles: list[SubtitleItem]
     video_id: str | None = None
     video_path: str | None = None
+    last_worked_subtitle_index: int | None = None
 
 
 class SrtSaveResponse(BaseModel):
@@ -122,6 +134,7 @@ class SrtSaveResponse(BaseModel):
     count: int
     representative_frames_path: str
     project_id: str | None = None
+    last_worked_subtitle_index: int | None = None
 
 
 class SavedProjectSummary(BaseModel):
@@ -130,6 +143,7 @@ class SavedProjectSummary(BaseModel):
     video_filename: str
     srt_filename: str
     updated_at: str
+    last_worked_subtitle_index: int | None = None
 
 
 class SavedProjectsResponse(BaseModel):
@@ -140,6 +154,11 @@ class SavedProjectLoadResponse(BaseModel):
     project_id: str
     video: VideoUploadResponse
     srt: SrtUploadResponse
+    last_worked_subtitle_index: int | None = None
+
+
+class ProjectProgressRequest(BaseModel):
+    last_worked_subtitle_index: int = Field(ge=1)
 
 
 class TranscribeRequest(BaseModel):
@@ -155,6 +174,8 @@ class MasterSubtitleInput(BaseModel):
     end_time: float
     text: str
     representative_time: float | None = None
+    exclude_from_training: bool = False
+    exclude_reason: str = ""
 
 
 class MasterExportRequest(BaseModel):
@@ -461,7 +482,6 @@ def load_representative_frames(srt_path: Path, subtitles: list[SubtitleItem]) ->
         if not entry:
             continue
         try:
-            frame_time = float(entry["representative_time"])
             saved_start = float(entry["start_time"])
             saved_end = float(entry["end_time"])
         except (KeyError, TypeError, ValueError):
@@ -471,10 +491,19 @@ def load_representative_frames(srt_path: Path, subtitles: list[SubtitleItem]) ->
             abs(saved_start - subtitle.start_time) > 0.001
             or abs(saved_end - subtitle.end_time) > 0.001
             or entry.get("text") != subtitle.text
-            or not subtitle.start_time <= frame_time <= subtitle.end_time
         ):
             continue
-        subtitle.representative_time = round(frame_time, 3)
+
+        # 学習除外フラグ（代表フレームの有無とは独立）
+        subtitle.exclude_from_training = bool(entry.get("exclude_from_training", False))
+        subtitle.exclude_reason = str(entry.get("exclude_reason") or "")
+
+        try:
+            frame_time = float(entry["representative_time"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if subtitle.start_time <= frame_time <= subtitle.end_time:
+            subtitle.representative_time = round(frame_time, 3)
 
     return subtitles
 
@@ -482,17 +511,21 @@ def load_representative_frames(srt_path: Path, subtitles: list[SubtitleItem]) ->
 def write_representative_frames(srt_path: Path, subtitles: list[SubtitleItem]) -> Path:
     entries = []
     for index, subtitle in enumerate(subtitles, start=1):
-        if subtitle.representative_time is None:
+        if subtitle.representative_time is None and not subtitle.exclude_from_training:
             continue
-        entries.append(
-            {
-                "index": index,
-                "start_time": round(subtitle.start_time, 3),
-                "end_time": round(subtitle.end_time, 3),
-                "text": subtitle.text,
-                "representative_time": round(subtitle.representative_time, 3),
-            }
-        )
+        entry = {
+            "index": index,
+            "start_time": round(subtitle.start_time, 3),
+            "end_time": round(subtitle.end_time, 3),
+            "text": subtitle.text,
+            "representative_time": (
+                round(subtitle.representative_time, 3) if subtitle.representative_time is not None else None
+            ),
+        }
+        if subtitle.exclude_from_training:
+            entry["exclude_from_training"] = True
+            entry["exclude_reason"] = subtitle.exclude_reason.strip()
+        entries.append(entry)
 
     metadata_path = representative_frames_path(srt_path)
     payload = {
@@ -560,8 +593,18 @@ def project_id_for(video_id: str, srt_path: Path) -> str:
     return f"project_{safe_identifier(video_id)}__{safe_identifier(srt_path.stem)}"
 
 
-def save_project(video_id: str, video_path: Path, srt_path: Path) -> dict:
+def save_project(
+    video_id: str,
+    video_path: Path,
+    srt_path: Path,
+    last_worked_subtitle_index: int | None = None,
+) -> dict:
     project_id = project_id_for(video_id, srt_path)
+    existing_records = read_jsonl(PROJECTS_JSONL)
+    existing_record = next((item for item in existing_records if item.get("project_id") == project_id), None)
+    if last_worked_subtitle_index is None and existing_record is not None:
+        last_worked_subtitle_index = existing_record.get("last_worked_subtitle_index")
+
     record = {
         "project_id": project_id,
         "video_id": video_id,
@@ -570,12 +613,25 @@ def save_project(video_id: str, video_path: Path, srt_path: Path) -> dict:
         "srt_path": relative_to_root(srt_path),
         "srt_filename": srt_path.name,
         "updated_at": datetime.now(timezone.utc).isoformat(),
+        "last_worked_subtitle_index": last_worked_subtitle_index,
     }
-    existing_records = read_jsonl(PROJECTS_JSONL)
     updated_records = [item for item in existing_records if item.get("project_id") != project_id]
     updated_records.append(record)
     write_jsonl(PROJECTS_JSONL, updated_records)
     return record
+
+
+def update_project_progress(project_id: str, last_worked_subtitle_index: int) -> dict:
+    records = read_jsonl(PROJECTS_JSONL)
+    for record in records:
+        if record.get("project_id") != project_id:
+            continue
+        record["last_worked_subtitle_index"] = last_worked_subtitle_index
+        record["updated_at"] = datetime.now(timezone.utc).isoformat()
+        write_jsonl(PROJECTS_JSONL, records)
+        return record
+
+    raise HTTPException(status_code=404, detail="保存済みの作業が見つかりません。")
 
 
 def saved_projects() -> list[dict]:
@@ -655,10 +711,10 @@ def write_clip(video_path: Path, video_id: str, sample_id: str, start_time: floa
     command = [
         ffmpeg_path,
         "-y",
-        "-i",
-        str(video_path),
         "-ss",
         f"{start_time:.3f}",
+        "-i",
+        str(video_path),
         "-t",
         f"{duration:.3f}",
         "-map",
@@ -698,10 +754,10 @@ def write_representative_frame(video_path: Path, video_id: str, sample_id: str, 
     command = [
         ffmpeg_path,
         "-y",
-        "-i",
-        str(video_path),
         "-ss",
         f"{frame_time:.3f}",
+        "-i",
+        str(video_path),
         "-frames:v",
         "1",
         "-q:v",
@@ -786,6 +842,33 @@ def extract_audio_for_transcription(video_path: Path, video_id: str) -> Path:
         raise HTTPException(status_code=500, detail=f"Failed to extract audio: {detail}")
 
     return output_path
+
+
+def load_asr_corrections() -> list[tuple[str, str]]:
+    if not ASR_CORRECTIONS_PATH.exists():
+        return list(DEFAULT_ASR_CORRECTIONS)
+
+    corrections: list[tuple[str, str]] = []
+    for raw_line in ASR_CORRECTIONS_PATH.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=>" not in line:
+            continue
+        wrong, right = [part.strip() for part in line.split("=>", 1)]
+        if wrong and wrong != right:
+            corrections.append((wrong, right))
+    return corrections
+
+
+def apply_asr_corrections(subtitles: list[SubtitleItem], corrections: list[tuple[str, str]]) -> int:
+    replaced = 0
+    for subtitle in subtitles:
+        text = subtitle.text
+        for wrong, right in corrections:
+            if wrong in text:
+                replaced += text.count(wrong)
+                text = text.replace(wrong, right)
+        subtitle.text = text
+    return replaced
 
 
 def transcribe_audio(audio_path: Path, model_size: str, language: str) -> list[SubtitleItem]:
@@ -922,7 +1005,7 @@ def validate_master_records(records: list[dict]) -> None:
 
 
 def export_master(records_by_split: dict[str, list[dict]], export_root: Path) -> list[str]:
-    records = [record for split in ("train", "val", "test") for record in records_by_split[split]]
+    records = [record for split in ("train", "val", "test", "excluded") for record in records_by_split.get(split, [])]
     return [write_export_jsonl(export_root / "master" / "master.jsonl", records)]
 
 
@@ -952,7 +1035,8 @@ def qwen_record(record: dict) -> dict:
 
 def export_qwen(records_by_split: dict[str, list[dict]], export_root: Path) -> list[str]:
     files: list[str] = []
-    for split, records in records_by_split.items():
+    for split in ("train", "val", "test"):
+        records = records_by_split[split]
         files.append(write_export_jsonl(export_root / "qwen" / f"{split}.jsonl", [qwen_record(record) for record in records]))
     return files
 
@@ -978,7 +1062,8 @@ def llava_record(record: dict) -> dict:
 
 def export_llava(records_by_split: dict[str, list[dict]], export_root: Path) -> list[str]:
     files: list[str] = []
-    for split, records in records_by_split.items():
+    for split in ("train", "val", "test"):
+        records = records_by_split[split]
         files.append(write_export_json(export_root / "llava" / f"{split}.json", [llava_record(record) for record in records]))
     return files
 
@@ -1012,7 +1097,8 @@ def trl_record(record: dict) -> dict:
 
 def export_trl(records_by_split: dict[str, list[dict]], export_root: Path) -> list[str]:
     files: list[str] = []
-    for split, records in records_by_split.items():
+    for split in ("train", "val", "test"):
+        records = records_by_split[split]
         files.append(write_export_jsonl(export_root / "trl" / f"{split}.jsonl", [trl_record(record) for record in records]))
     return files
 
@@ -1105,10 +1191,24 @@ def list_saved_projects() -> SavedProjectsResponse:
             video_filename=str(record["video_filename"]),
             srt_filename=str(record["srt_filename"]),
             updated_at=str(record["updated_at"]),
+            last_worked_subtitle_index=record.get("last_worked_subtitle_index"),
         )
         for record in saved_projects()
     ]
     return SavedProjectsResponse(projects=projects)
+
+
+@app.post("/api/projects/{project_id}/progress", response_model=SavedProjectSummary)
+def save_project_progress(project_id: str, request: ProjectProgressRequest) -> SavedProjectSummary:
+    record = update_project_progress(project_id, request.last_worked_subtitle_index)
+    return SavedProjectSummary(
+        project_id=str(record["project_id"]),
+        video_id=str(record["video_id"]),
+        video_filename=str(record["video_filename"]),
+        srt_filename=str(record["srt_filename"]),
+        updated_at=str(record["updated_at"]),
+        last_worked_subtitle_index=record.get("last_worked_subtitle_index"),
+    )
 
 
 @app.get("/api/projects/{project_id}", response_model=SavedProjectLoadResponse)
@@ -1136,6 +1236,7 @@ def load_saved_project(project_id: str) -> SavedProjectLoadResponse:
             stored_path=relative_to_root(srt_path),
             subtitles=subtitles,
         ),
+        last_worked_subtitle_index=record.get("last_worked_subtitle_index"),
     )
 
 
@@ -1226,6 +1327,11 @@ async def parse_srt_file(file: Annotated[UploadFile, File(...)]) -> list[Subtitl
 @app.post("/api/srt/save", response_model=SrtSaveResponse)
 def save_srt(request: SrtSaveRequest) -> SrtSaveResponse:
     ensure_dataset_dirs()
+    if request.last_worked_subtitle_index is not None and not (
+        1 <= request.last_worked_subtitle_index <= len(request.subtitles)
+    ):
+        raise HTTPException(status_code=400, detail="作業中の字幕番号が範囲外です。")
+
     for subtitle in request.subtitles:
         if subtitle.end_time <= subtitle.start_time:
             raise HTTPException(status_code=400, detail="Each subtitle end_time must be greater than start_time")
@@ -1246,13 +1352,19 @@ def save_srt(request: SrtSaveRequest) -> SrtSaveResponse:
             raise HTTPException(status_code=400, detail="Invalid video path") from exc
         if not video_path.exists():
             raise HTTPException(status_code=404, detail="Video not found")
-        project_id = save_project(request.video_id, video_path, stored_path)["project_id"]
+        project_id = save_project(
+            request.video_id,
+            video_path,
+            stored_path,
+            request.last_worked_subtitle_index,
+        )["project_id"]
 
     return SrtSaveResponse(
         path=relative_to_root(stored_path),
         count=len(request.subtitles),
         representative_frames_path=relative_to_root(metadata_path),
         project_id=project_id,
+        last_worked_subtitle_index=request.last_worked_subtitle_index,
     )
 
 
@@ -1268,10 +1380,25 @@ def transcribe_video(request: TranscribeRequest) -> SrtUploadResponse:
 
     audio_path = extract_audio_for_transcription(video_path, request.video_id)
     subtitles = transcribe_audio(audio_path, request.model_size, request.language)
+    corrections = load_asr_corrections()
+    replaced_count = apply_asr_corrections(subtitles, corrections)
     if not subtitles:
         raise HTTPException(status_code=500, detail="文字起こし結果が空でした。音声が含まれているか確認してください。")
 
     stored_path = save_transcribed_srt(video_path, subtitles)
+    # 再現性のため、文字起こし条件をSRTと同じ場所に記録する
+    write_export_json(
+        stored_path.with_name(f"{stored_path.stem}.transcription.json"),
+        {
+            "srt_filename": stored_path.name,
+            "video_path": request.video_path,
+            "model_size": request.model_size,
+            "language": request.language,
+            "corrections": [{"wrong": wrong, "right": right} for wrong, right in corrections],
+            "replaced_count": replaced_count,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        },
+    )
     return SrtUploadResponse(
         subtitle_id=f"srt_{Path(stored_path).stem}",
         filename=stored_path.name,
@@ -1364,6 +1491,8 @@ def export_utterances(request: MasterExportRequest) -> MasterExportResponse:
                 "scene_description": "",
                 "notes": "",
                 "annotation_status": "draft",
+                "exclude_from_training": subtitle.exclude_from_training,
+                "exclude_reason": subtitle.exclude_reason.strip() if subtitle.exclude_from_training else "",
                 "created_at": created_at,
             }
         )
@@ -1379,7 +1508,12 @@ def export_utterances(request: MasterExportRequest) -> MasterExportResponse:
         export_record["frame_paths"] = [export_record["image_path"]]
         export_records.append(export_record)
 
-    records_by_split = split_records(export_records)
+    training_records = [record for record in export_records if not record["exclude_from_training"]]
+    excluded_records = [record for record in export_records if record["exclude_from_training"]]
+    records_by_split = split_records(training_records)
+    for record in excluded_records:
+        record["split"] = "excluded"
+    records_by_split["excluded"] = excluded_records
     canonical_by_id = {record["id"]: record for record in canonical_records}
     for export_record in export_records:
         canonical_record = canonical_by_id[export_record["id"]]
@@ -1399,6 +1533,7 @@ def export_utterances(request: MasterExportRequest) -> MasterExportResponse:
         "frame_count": frame_count,
         "selected_formats": selected_formats,
         "split_strategy": {"train": 0.8, "val": 0.1, "test": 0.1},
+        "excluded_count": len(excluded_records),
         "split_counts": split_counts,
         "files": [Path(file_path).relative_to(relative_to_root(export_root)).as_posix() if file_path.startswith(relative_to_root(export_root)) else file_path for file_path in files],
     }

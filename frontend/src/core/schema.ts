@@ -18,10 +18,12 @@ export type MasterRecord = {
   instruction: string;
   answer: string;
   transcript: string;
-  split: MasterSplit;
+  split: MasterSplit | "excluded";
   scene_description: string;
   notes: string;
   annotation_status: "draft" | "reviewed" | "done";
+  exclude_from_training: boolean;
+  exclude_reason: string;
   created_at: string;
 };
 

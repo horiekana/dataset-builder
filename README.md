@@ -2,7 +2,7 @@
 
 研究用の歩行動画データセット作成ツールです。現時点では、動画ファイルと外部ツールで作成済みのSRT字幕ファイルを読み込み、またはfaster-whisperで動画から字幕下書きを作成し、ブラウザ上で動画再生、現在秒数コピー、字幕一覧表示、字幕編集、字幕の追加・削除、発話区間編集、代表フレーム指定、SRT上書き保存、発話単位の内部master形式への正規化、モデル別データセット出力、発話ごとの動画クリップ書き出しを行います。
 
-字幕間の `+` を押すと、その位置に空字幕を追加します。新しい字幕は基本2秒間で、次の字幕が近い場合は次の開始時刻までの区間になります。SRTは `Command+S`、または `Ctrl+S` で上書き保存します。データセット出力では `master.jsonl`、Qwen2.5-VL用JSONL、LLaVA用JSON、TRL/SFTTrainer用JSONLをチェックボックスで選択できます。`master.jsonl` はデフォルトONです。
+字幕間の `+` を押すと、その位置に空字幕を追加します。新しい字幕は基本2秒間で、次の字幕が近い場合は次の開始時刻までの区間になります。SRTは `Command+S`、または `Ctrl+S` で上書き保存します。連続する字幕を選んだ状態で `Command+Shift+M`、または `Ctrl+Shift+M` を押すと、選択した字幕を結合できます。データセット出力では `master.jsonl`、Qwen2.5-VL用JSONL、LLaVA用JSON、TRL/SFTTrainer用JSONLをチェックボックスで選択できます。`master.jsonl` はデフォルトONです。
 
 この段階では、文字起こし機能は実装していません。
 
@@ -57,6 +57,14 @@ pip install -r requirements.txt
 
 `faster-whisper` は初回の文字起こし時にモデルをダウンロードします。文字起こしでは `base` と `small` を選択できます。まずは軽い `base`、精度を上げたい場合は `small` を使います。
 
+### 誤認識の自動置き換え
+
+ルートディレクトリの `asr_corrections.txt` に「誤り => 正しい」の形で書いた対応表を使い、文字起こし直後の字幕を機械的に置き換えます（例：`テンジブロック => 点字ブロック`）。`#` で始まる行は無視されます。ファイルがない場合はアプリ内の既定の対応表を使います。
+
+文字起こしの条件（モデル、言語、置き換え表、置き換えた件数）は、作成したSRTと同じフォルダに `{SRT名}.transcription.json` として保存されます。
+
+なお、faster-whisper の `initial_prompt` / `hotwords` に専門用語のリストを渡す方式は、無音や雑音の区間で単語リストがそのまま字幕として出力されたため採用していません。
+
 別の場所から続けて:
 
 ```bash
@@ -92,8 +100,9 @@ API:
 - `POST /api/srt`: SRTファイルを `dataset/annotations/` に保存し、字幕配列を返します。同名ファイルがある場合は `_001` のような連番を付けます。代表フレーム情報を持つ同名の編集済みSRTがある場合は、その保存版を再利用します。
 - `POST /api/srt/parse`: SRTファイルを保存せずにパース結果だけ返します。
 - `POST /api/srt/save`: 画面で編集・追加・削除した字幕本文と区間を、読み込み済みSRTファイルへ上書き保存します。代表フレーム時刻は同じフォルダの `{SRT名}.representative_frames.json` に保存します。字幕をすべて削除した場合は空のSRTとして保存します。
-- `GET /api/projects`: `Command+S` で保存した動画・SRTの組を一覧で返します。
+- `GET /api/projects`: `Command+S` で保存した動画・SRTの組と、最後に作業した字幕番号を一覧で返します。
 - `GET /api/projects/{project_id}`: 保存済みの動画、SRT、代表フレーム時刻をまとめて読み込みます。
+- `POST /api/projects/{project_id}/progress`: 最後に操作した字幕番号を保存します。
 - `POST /api/transcribe`: 動画から音声を抽出し、faster-whisperで字幕下書きを作成します。結果は `dataset/annotations/` にSRTとして保存され、画面の字幕一覧に読み込まれます。
 - `POST /api/master/utterances`: 編集済み字幕を内部master形式に正規化し、`dataset/annotations/master.jsonl` を更新します。代表フレーム画像は `dataset/processed/frames/{video_id}/`、動画クリップは `dataset/processed/clips/{video_id}/` に書き出します。選択された形式は `dataset/exports/export_.../` にまとめて出力します。
 
@@ -101,6 +110,9 @@ API:
 `video_id` は元動画ファイル名ベースで作成します。たとえば `テスト用2.mp4` は `video_テスト用2` になり、同じIDが既にある場合は `video_テスト用2_001` のように連番を付けます。
 
 動画とSRTを読み込んだ状態で `Command+S` を押すと、`annotations/projects.jsonl` に作業の組が保存されます。次回以降は画面上部の「保存済みの作業」から選ぶと、動画、SRT、代表フレーム時刻を複製せずに再開できます。
+字幕をクリック・編集すると、最後に作業した字幕番号も保存されます。保存済みの作業を開くと、その字幕まで自動で移動します。
+
+文字起こし結果が細かく分かれた場合は、各字幕のチェックボックスで連続する行を2件以上選び、「選択を結合」を押してください。先頭の開始時刻から末尾の終了時刻までを1件の字幕にし、本文を連結します。代表フレームが設定されている場合は、結合した区間の中央に最も近いものを引き継ぎます。
 
 SRTの返却形式:
 
@@ -146,6 +158,16 @@ dataset/exports/export_20260708T120000Z_video_example/
 ```
 
 `manifest.json` には、出力日時、件数、選択形式、データ分割、アプリバージョン、出力ファイル一覧が入ります。
+
+### 学習に使わないフラグ
+
+各字幕の「学習に使わない」にチェックを入れると、その字幕は学習用データから除外されます。除外理由は任意で、プルダウン（経路説明／訓練特有の発話／対話・雑談／映像に対象なし／聞き取り不明瞭／その他）から選びます。
+
+- フラグと理由は `{SRT名}.representative_frames.json` に `exclude_from_training` / `exclude_reason` として保存されます。SRT本体は変わりません。
+- 書き出し時、除外した字幕も `master.jsonl` には残り、`split` は `excluded`、`exclude_from_training: true` になります。
+- Qwen / LLaVA / TRL 形式の train / val / test には含まれません。train / val / test の分割は除外していない字幕だけで行います。
+- `manifest.json` の `excluded_count` に除外件数が入ります。
+- 除外した字幕も、書き出し時には代表フレームの設定が必要です（クリップと代表フレームも書き出されます）。
 
 TRL/SFTTrainer用JSONLはVLM向けに、`image` 列と structured `messages.content` を出力します。`messages[0].content` は `{"type": "image"}` と `{"type": "text"}` の配列です。`video` には対応する動画クリップのパスも残しますが、SFTTrainerでまず使う主入力は代表フレーム画像です。
 
